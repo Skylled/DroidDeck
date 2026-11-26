@@ -25,6 +25,7 @@
 #include "xr_tracking.h"
 #include "xr_frame_channel.h"
 #include "xr_frame_math.h"
+#include "xr_android_xr.h"
 #include "gpu_frames.h"
 
 static void check(XrResult result, const char *operation) {
@@ -76,7 +77,8 @@ public:
             "\"headPosition\":[%.6f,%.6f,%.6f],\"controllersActive\":[%s,%s],"
             "\"periodNs\":%lld,\"surfaceSwapchain\":%s,\"source\":\"%s\",\"guestFrames\":%lld,\"steamvrState\":%d,"
             "\"receivedFrames\":%llu,\"rejectedFrames\":%llu,\"uploadedFrames\":%llu,\"sourceFrameId\":%llu,"
-            "\"gpuReceivedFrames\":%llu,\"gpuDroppedFrames\":%llu,\"gpuVerifiedFrameId\":%llu,\"gpuChecksum\":%u,\"error\":\"%s\"}\n",
+            "\"gpuReceivedFrames\":%llu,\"gpuDroppedFrames\":%llu,\"gpuVerifiedFrameId\":%llu,\"gpuChecksum\":%u,"
+            "\"eyeWidth\":%d,\"eyeHeight\":%d,\"handTracking\":%s,\"error\":\"%s\"}\n",
             (unsigned long long)frames_, (unsigned long long)rendered_, state_,
             (unsigned long long)head_.locationFlags,
             head_.pose.position.x, head_.pose.position.y, head_.pose.position.z,
@@ -86,7 +88,8 @@ public:
             (unsigned long long)(receiver_.Rejected() + gpuFrames_.Rejected()),
             (unsigned long long)uploadedFrames_, (unsigned long long)sourceHeader_.frame_id,
             (unsigned long long)gpuFrames_.Received(), (unsigned long long)gpuFrames_.Dropped(),
-            (unsigned long long)verifiedFrame_, gpuChecksum_, error);
+            (unsigned long long)verifiedFrame_, gpuChecksum_,
+            eyes_[0].width, eyes_[0].height, handTrackingActive_ ? "true" : "false", error);
         std::fclose(file);
         std::rename(temp.c_str(), path.c_str());
     }
@@ -109,6 +112,19 @@ private:
     bool timespecSupported_ = false;
     PFN_xrPerfSettingsSetPerformanceLevelEXT setPerformance_ = nullptr;
     bool performanceSupported_ = false;
+    PFN_xrEnumerateDisplayRefreshRatesFB enumerateRefreshRates_ = nullptr;
+    PFN_xrGetDisplayRefreshRateFB getRefreshRate_ = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB requestRefreshRate_ = nullptr;
+    bool refreshRateSupported_ = false;
+    PFN_xrCreateHandTrackerEXT createHandTracker_ = nullptr;
+    PFN_xrDestroyHandTrackerEXT destroyHandTracker_ = nullptr;
+    PFN_xrLocateHandJointsEXT locateHandJoints_ = nullptr;
+    bool handTrackingExtSupported_ = false, handTrackingSystemSupported_ = false, handTrackingActive_ = false;
+    XrHandTrackerEXT handTrackers_[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    int maxEyePixels_ = 0, renderScalePercent_ = 0;
+    float targetRefreshHz_ = 0.0f, negotiatedRefreshHz_ = 0.0f;
+    bool handTrackingEnabled_ = true;
+    std::string systemName_;
     XrPath hands_[2]{};
     XrSpace handSpaces_[2]{};
     XrSpaceLocation head_{XR_TYPE_SPACE_LOCATION};
@@ -126,6 +142,7 @@ private:
     jmethodID frameCallback_ = nullptr;
     jmethodID activeCallback_ = nullptr;
     jmethodID statusCallback_ = nullptr;
+    jmethodID runtimeInfoCallback_ = nullptr;
     DroidDeckXrTracking *tracking_ = nullptr;
     DroidDeckXrHaptics *haptics_ = nullptr;
     uint64_t lastPulse_[2]{};
@@ -244,6 +261,33 @@ private:
         frameCallback_ = env_->GetMethodID(activityClass, "onXrFrame", "(J)V");
         statusCallback_ = env_->GetMethodID(activityClass, "onXrStatus", "()I");
         if (env_->ExceptionCheck()) { env_->ExceptionClear(); throw std::runtime_error("XR activity bridge methods unavailable"); }
+        auto optionalInt = [&](const char *name, int fallback) -> int {
+            jmethodID id = env_->GetMethodID(activityClass, name, "()I");
+            if (!id || env_->ExceptionCheck()) { env_->ExceptionClear(); return fallback; }
+            jint value = env_->CallIntMethod(app_->activity->clazz, id);
+            if (env_->ExceptionCheck()) { env_->ExceptionClear(); return fallback; }
+            return static_cast<int>(value);
+        };
+        auto optionalFloat = [&](const char *name, float fallback) -> float {
+            jmethodID id = env_->GetMethodID(activityClass, name, "()F");
+            if (!id || env_->ExceptionCheck()) { env_->ExceptionClear(); return fallback; }
+            jfloat value = env_->CallFloatMethod(app_->activity->clazz, id);
+            if (env_->ExceptionCheck()) { env_->ExceptionClear(); return fallback; }
+            return static_cast<float>(value);
+        };
+        auto optionalBool = [&](const char *name, bool fallback) -> bool {
+            jmethodID id = env_->GetMethodID(activityClass, name, "()Z");
+            if (!id || env_->ExceptionCheck()) { env_->ExceptionClear(); return fallback; }
+            jboolean value = env_->CallBooleanMethod(app_->activity->clazz, id);
+            if (env_->ExceptionCheck()) { env_->ExceptionClear(); return fallback; }
+            return value == JNI_TRUE;
+        };
+        maxEyePixels_ = optionalInt("getXrMaxEyePixels", 0);
+        renderScalePercent_ = optionalInt("getXrRenderScalePercent", 0);
+        targetRefreshHz_ = optionalFloat("getXrTargetRefreshHz", 0.0f);
+        handTrackingEnabled_ = optionalBool("isXrHandTrackingEnabled", true);
+        runtimeInfoCallback_ = env_->GetMethodID(activityClass, "onXrRuntimeInfo", "(Ljava/lang/String;IIFZ)V");
+        if (env_->ExceptionCheck()) { env_->ExceptionClear(); runtimeInfoCallback_ = nullptr; }
         env_->DeleteLocalRef(intentClass); env_->DeleteLocalRef(intent); env_->DeleteLocalRef(activityClass);
         PFN_xrInitializeLoaderKHR initializeLoader = nullptr;
         check(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
@@ -261,10 +305,16 @@ private:
                 timespecSupported_ = true;
             if (!std::strcmp(extension.extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME))
                 performanceSupported_ = true;
+            if (!std::strcmp(extension.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
+                refreshRateSupported_ = true;
+            if (!std::strcmp(extension.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME))
+                handTrackingExtSupported_ = true;
         }
         std::vector<const char *> enabled{XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME, XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME};
         if (timespecSupported_) enabled.push_back(XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME);
         if (performanceSupported_) enabled.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+        if (refreshRateSupported_) enabled.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        if (handTrackingExtSupported_ && handTrackingEnabled_) enabled.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
         XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
         androidInfo.applicationVM = app_->activity->vm;
         androidInfo.applicationActivity = app_->activity->clazz;
@@ -283,9 +333,34 @@ private:
         }
         if (timespecSupported_) check(xrGetInstanceProcAddr(instance_, "xrConvertTimeToTimespecTimeKHR",
             reinterpret_cast<PFN_xrVoidFunction *>(&convertTime_)), "time conversion entrypoint");
+        if (refreshRateSupported_) {
+            if (XR_FAILED(xrGetInstanceProcAddr(instance_, "xrEnumerateDisplayRefreshRatesFB",
+                    reinterpret_cast<PFN_xrVoidFunction *>(&enumerateRefreshRates_)))) enumerateRefreshRates_ = nullptr;
+            if (XR_FAILED(xrGetInstanceProcAddr(instance_, "xrGetDisplayRefreshRateFB",
+                    reinterpret_cast<PFN_xrVoidFunction *>(&getRefreshRate_)))) getRefreshRate_ = nullptr;
+            if (XR_FAILED(xrGetInstanceProcAddr(instance_, "xrRequestDisplayRefreshRateFB",
+                    reinterpret_cast<PFN_xrVoidFunction *>(&requestRefreshRate_)))) requestRefreshRate_ = nullptr;
+        }
+        if (handTrackingExtSupported_ && handTrackingEnabled_) {
+            if (XR_FAILED(xrGetInstanceProcAddr(instance_, "xrCreateHandTrackerEXT",
+                    reinterpret_cast<PFN_xrVoidFunction *>(&createHandTracker_)))) createHandTracker_ = nullptr;
+            if (XR_FAILED(xrGetInstanceProcAddr(instance_, "xrDestroyHandTrackerEXT",
+                    reinterpret_cast<PFN_xrVoidFunction *>(&destroyHandTracker_)))) destroyHandTracker_ = nullptr;
+            if (XR_FAILED(xrGetInstanceProcAddr(instance_, "xrLocateHandJointsEXT",
+                    reinterpret_cast<PFN_xrVoidFunction *>(&locateHandJoints_)))) locateHandJoints_ = nullptr;
+        }
         XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
         systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
         check(xrGetSystem(instance_, &systemInfo, &system_), "xrGetSystem");
+        {
+            XrSystemHandTrackingPropertiesEXT handProps{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
+            XrSystemProperties systemProps{XR_TYPE_SYSTEM_PROPERTIES};
+            if (handTrackingExtSupported_ && handTrackingEnabled_) systemProps.next = &handProps;
+            if (XR_SUCCEEDED(xrGetSystemProperties(instance_, system_, &systemProps))) {
+                systemName_ = systemProps.systemName;
+                handTrackingSystemSupported_ = handTrackingExtSupported_ && handTrackingEnabled_ && handProps.supportsHandTracking == XR_TRUE;
+            }
+        }
         PFN_xrGetOpenGLESGraphicsRequirementsKHR requirementsFunction = nullptr;
         check(xrGetInstanceProcAddr(instance_, "xrGetOpenGLESGraphicsRequirementsKHR",
             reinterpret_cast<PFN_xrVoidFunction *>(&requirementsFunction)), "GLES requirements entrypoint");
@@ -325,7 +400,10 @@ private:
         reference.poseInReferenceSpace.position.y = 0;
         check(xrCreateReferenceSpace(session_, &reference, &view_), "view space");
         initializeActions();
+        configureRefreshRate();
+        initializeHandTracking();
         initializeImages();
+        notifyRuntimeInfo();
         initializeGraphics();
         initializeTracking();
         {
@@ -380,10 +458,32 @@ private:
             bindings.push_back({vibration_, path((root + "/output/haptic").c_str())});
         }
         bindings.push_back({menu_, path("/user/hand/left/input/menu/click")});
-        XrInteractionProfileSuggestedBinding suggestion{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-        suggestion.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
-        suggestion.countSuggestedBindings = bindings.size(); suggestion.suggestedBindings = bindings.data();
-        check(xrSuggestInteractionProfileBindings(instance_, &suggestion), "Touch bindings");
+        auto suggestProfile = [&](const char *profilePath, const std::vector<XrActionSuggestedBinding> &profileBindings) -> bool {
+            XrPath profile{};
+            if (XR_FAILED(xrStringToPath(instance_, profilePath, &profile))) return false;
+            XrInteractionProfileSuggestedBinding suggestion{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+            suggestion.interactionProfile = profile;
+            suggestion.countSuggestedBindings = profileBindings.size();
+            suggestion.suggestedBindings = profileBindings.data();
+            XrResult result = xrSuggestInteractionProfileBindings(instance_, &suggestion);
+            if (XR_FAILED(result)) {
+                __android_log_print(ANDROID_LOG_WARN, "DroidDeckXR", "interaction profile %s unsupported: %d", profilePath, result);
+                return false;
+            }
+            return true;
+        };
+        int suggestedProfiles = 0;
+        if (suggestProfile("/interaction_profiles/oculus/touch_controller", bindings)) suggestedProfiles++;
+        std::vector<XrActionSuggestedBinding> simpleBindings;
+        for (const char *hand : {"left", "right"}) {
+            std::string root = std::string("/user/hand/") + hand;
+            simpleBindings.push_back({grip_, path((root + "/input/grip/pose").c_str())});
+            simpleBindings.push_back({trigger_, path((root + "/input/select/click").c_str())});
+            simpleBindings.push_back({vibration_, path((root + "/output/haptic").c_str())});
+        }
+        simpleBindings.push_back({menu_, path("/user/hand/left/input/menu/click")});
+        if (suggestProfile("/interaction_profiles/khr/simple_controller", simpleBindings)) suggestedProfiles++;
+        if (suggestedProfiles == 0) throw std::runtime_error("No supported OpenXR interaction profile");
         XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
         attach.countActionSets = 1; attach.actionSets = &actions_;
         check(xrAttachSessionActionSets(session_, &attach), "attach actions");
@@ -392,6 +492,54 @@ private:
             space.action = grip_; space.subactionPath = hands_[hand]; space.poseInActionSpace.orientation.w = 1;
             check(xrCreateActionSpace(session_, &space, &handSpaces_[hand]), "controller space");
         }
+    }
+
+    void configureRefreshRate() {
+        if (!enumerateRefreshRates_ || !requestRefreshRate_) return;
+        uint32_t rateCount = 0;
+        if (XR_FAILED(enumerateRefreshRates_(session_, 0, &rateCount, nullptr)) || rateCount == 0) return;
+        std::vector<float> rates(rateCount, 0.0f);
+        if (XR_FAILED(enumerateRefreshRates_(session_, rateCount, &rateCount, rates.data())) || rateCount == 0) return;
+        rates.resize(rateCount);
+        float chosen = xr_pick_refresh_rate(rates.data(), rates.size(), targetRefreshHz_);
+        if (chosen > 0.0f) {
+            XrResult result = requestRefreshRate_(session_, chosen);
+            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "refresh rate request=%.1fHz result=%d", chosen, result);
+            if (XR_SUCCEEDED(result)) negotiatedRefreshHz_ = chosen;
+        }
+        if (getRefreshRate_) {
+            float current = 0.0f;
+            if (XR_SUCCEEDED(getRefreshRate_(session_, &current)) && current > 0.0f) negotiatedRefreshHz_ = current;
+        }
+    }
+
+    void initializeHandTracking() {
+        if (!handTrackingSystemSupported_ || !createHandTracker_ || !destroyHandTracker_ || !locateHandJoints_) return;
+        for (int hand = 0; hand < 2; hand++) {
+            XrHandTrackerCreateInfoEXT info{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+            info.hand = hand == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+            info.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+            XrResult result = createHandTracker_(session_, &info, &handTrackers_[hand]);
+            if (XR_FAILED(result)) {
+                __android_log_print(ANDROID_LOG_WARN, "DroidDeckXR", "hand tracker %d unavailable: %d", hand, result);
+                for (auto &tracker : handTrackers_) {
+                    if (tracker != XR_NULL_HANDLE) { destroyHandTracker_(tracker); tracker = XR_NULL_HANDLE; }
+                }
+                return;
+            }
+        }
+        handTrackingActive_ = true;
+        __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "OpenXR hand tracking active");
+    }
+
+    void notifyRuntimeInfo() {
+        if (!runtimeInfoCallback_) return;
+        jstring name = env_->NewStringUTF(systemName_.c_str());
+        env_->CallVoidMethod(app_->activity->clazz, runtimeInfoCallback_, name,
+            static_cast<jint>(eyes_[0].width), static_cast<jint>(eyes_[0].height),
+            static_cast<jfloat>(negotiatedRefreshHz_), static_cast<jboolean>(handTrackingActive_ ? JNI_TRUE : JNI_FALSE));
+        if (env_->ExceptionCheck()) env_->ExceptionClear();
+        env_->DeleteLocalRef(name);
     }
 
     void initializeImages() {
@@ -407,11 +555,31 @@ private:
         check(xrEnumerateSwapchainFormats(session_, count, &count, formats.data()), "formats");
         int64_t format = 0;
         for (int64_t candidate : formats) if (candidate == GL_SRGB8_ALPHA8) format = candidate;
-        if (!format) throw std::runtime_error("sRGB swapchain unavailable");
+        if (!format) {
+            for (int64_t candidate : formats) if (candidate == GL_RGBA8) format = candidate;
+        }
+        if (!format) throw std::runtime_error("sRGB/RGBA8 swapchain unavailable");
         for (int eye = 0; eye < 2; eye++) {
             Eye &target = eyes_[eye];
-            target.width = views[eye].recommendedImageRectWidth;
-            target.height = views[eye].recommendedImageRectHeight;
+            const uint32_t recW = views[eye].recommendedImageRectWidth;
+            const uint32_t recH = views[eye].recommendedImageRectHeight;
+            const uint32_t effectiveMax = maxEyePixels_ > 0 ? static_cast<uint32_t>(maxEyePixels_)
+                : ((recW > 2200u || recH > 2200u) ? 1800u : 0u);
+            const uint32_t scalePct = renderScalePercent_ > 0 ? static_cast<uint32_t>(renderScalePercent_) : 0u;
+            uint32_t targetW = 0, targetH = 0;
+            xr_compute_target_eye_size(recW, recH, effectiveMax, scalePct, DROIDDECK_XR_FRAME_MAX_BYTES, &targetW, &targetH);
+            if ((views[eye].maxImageRectWidth && targetW > views[eye].maxImageRectWidth) ||
+                (views[eye].maxImageRectHeight && targetH > views[eye].maxImageRectHeight)) {
+                uint32_t cap = std::min(views[eye].maxImageRectWidth ? views[eye].maxImageRectWidth : 4096u,
+                                        views[eye].maxImageRectHeight ? views[eye].maxImageRectHeight : 4096u);
+                xr_compute_target_eye_size(targetW, targetH, cap, 0u, DROIDDECK_XR_FRAME_MAX_BYTES, &targetW, &targetH);
+            }
+            target.width = static_cast<int>(targetW);
+            target.height = static_cast<int>(targetH);
+            if (eye == 0) {
+                __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "eye resolution rec=%ux%u -> target=%dx%d (maxPx=%u scale=%u)",
+                    recW, recH, target.width, target.height, effectiveMax, scalePct);
+            }
             XrSwapchainCreateInfo create{XR_TYPE_SWAPCHAIN_CREATE_INFO};
             create.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
             create.format = format; create.sampleCount = 1;
@@ -674,6 +842,44 @@ private:
                     XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN}; check(xrGetActionStateBoolean(session_, &get, &value), "button state");
                     if (value.isActive && value.currentState) inputs_[hand].buttons |= button.second;
                 }
+                const bool controllerTracked = handActive_[hand] && (handLocations_[hand].locationFlags & 15u) == 15u;
+                if (!controllerTracked && handTrackingActive_ && handTrackers_[hand] != XR_NULL_HANDLE && locateHandJoints_) {
+                    XrHandJointsLocateInfoEXT locateInfo{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+                    locateInfo.baseSpace = world_;
+                    locateInfo.time = frameState.predictedDisplayTime;
+                    XrHandJointLocationEXT jointLocations[XR_HAND_JOINT_COUNT_EXT]{};
+                    XrHandJointLocationsEXT locations{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+                    locations.jointCount = XR_HAND_JOINT_COUNT_EXT;
+                    locations.jointLocations = jointLocations;
+                    if (XR_SUCCEEDED(locateHandJoints_(handTrackers_[hand], &locateInfo, &locations)) && locations.isActive) {
+                        auto sample = [&](XrHandJointEXT joint) -> XrHandJointSample {
+                            const auto &j = jointLocations[joint];
+                            return {{j.pose.orientation.x, j.pose.orientation.y, j.pose.orientation.z, j.pose.orientation.w},
+                                    {j.pose.position.x, j.pose.position.y, j.pose.position.z},
+                                    static_cast<uint32_t>(j.locationFlags)};
+                        };
+                        XrHandSynthesisInput synthInput{
+                            sample(XR_HAND_JOINT_PALM_EXT),
+                            sample(XR_HAND_JOINT_WRIST_EXT),
+                            sample(XR_HAND_JOINT_THUMB_TIP_EXT),
+                            sample(XR_HAND_JOINT_INDEX_TIP_EXT),
+                            sample(XR_HAND_JOINT_MIDDLE_TIP_EXT),
+                            sample(XR_HAND_JOINT_RING_TIP_EXT),
+                            sample(XR_HAND_JOINT_LITTLE_TIP_EXT),
+                        };
+                        DroidDeckXrHand synthHand{};
+                        if (xr_synthesize_hand_controller(synthInput, &synthHand)) {
+                            inputs_[hand] = synthHand;
+                            handActive_[hand] = true;
+                            handLocations_[hand].locationFlags = synthHand.pose.flags;
+                            handLocations_[hand].pose.orientation = {
+                                synthHand.pose.orientation[0], synthHand.pose.orientation[1],
+                                synthHand.pose.orientation[2], synthHand.pose.orientation[3]};
+                            handLocations_[hand].pose.position = {
+                                synthHand.pose.position[0], synthHand.pose.position[1], synthHand.pose.position[2]};
+                        }
+                    }
+                }
             }
         } else handActive_[0] = handActive_[1] = false;
         pollHaptics();
@@ -749,6 +955,11 @@ private:
         if (display_ != EGL_NO_DISPLAY && context_ != EGL_NO_CONTEXT) {
             glDeleteFramebuffers(1, &framebuffer_); glDeleteVertexArrays(1, &vertexArray_);
             glDeleteTextures(1, &cpuTexture_); glDeleteProgram(sourceProgram_);
+        }
+        if (destroyHandTracker_) {
+            for (auto &tracker : handTrackers_) {
+                if (tracker != XR_NULL_HANDLE) { destroyHandTracker_(tracker); tracker = XR_NULL_HANDLE; }
+            }
         }
         for (auto &eye : eyes_) if (eye.swapchain) xrDestroySwapchain(eye.swapchain);
         for (auto space : handSpaces_) if (space) xrDestroySpace(space);
