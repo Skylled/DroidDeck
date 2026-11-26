@@ -226,6 +226,30 @@ def little_nightmares_threads(game):
         return {"PROTONFIXES_DISABLE": "1"}, [], "Little Nightmares: umu-protonfixes off (its -onethread puts the game and renderer on one thread)"
 
 
+@fix
+def half_life_alyx_vr(game):
+    if game.app_id != "546560" and game.stem != "hlvr":
+        return None
+    def has_flag(name):
+        return any(a.lower() == name or a.lower().startswith(name + "=") for a in game.args)
+    if not (os.environ.get("DROIDDECK_VR_PRESENT") or os.environ.get("VR_OVERRIDE") or has_flag("-vr")):
+        return None
+    extra = []
+    if not has_flag("-novid"):
+        extra.append("-novid")
+    if not any(has_flag(arg) for arg in ("-vulkan", "-dx11", "-gl")):
+        extra.append("-vulkan")
+    if not has_flag("+vr_fidelity_level_auto"):
+        extra += ["+vr_fidelity_level_auto", "0"]
+    if not has_flag("+vr_fidelity_level"):
+        extra += ["+vr_fidelity_level", "1"]
+    if not has_flag("+vr_render_scale"):
+        extra += ["+vr_render_scale", "0.65"]
+    if not extra:
+        return None
+    return {}, extra, "Half-Life: Alyx: standalone VR Vulkan and fixed fidelity scale"
+
+
 def names_module(overrides, names):
     for entry in (overrides or "").split(";"):
         if "=" in entry and names & {re.sub(r"^\*|\.dll$", "", name.lower()) for name in re.split(r"[, \t]", entry.split("=", 1)[0])}:
