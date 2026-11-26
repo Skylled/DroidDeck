@@ -267,6 +267,7 @@ class DrawerActions(
     val steamVr: SteamVr.Status? = null,
     val glassesPresent: Boolean = false,
     val glassesOutput: Boolean = false,
+    val xrHeadset: com.droiddeck.launcher.session.XrHeadsetInfo? = null,
     val immersiveSteamVr: Boolean = false,
     val textureAnisotropy: Int? = 0,
     val textureLodBias: String? = TextureFiltering.LOD_BIAS_OFF,
@@ -731,7 +732,7 @@ internal fun SessionDrawer(open: Boolean, requestedPage: SessionDrawerPage, cont
                                 onAdvancedToggle = { advancedEffectsExpanded = !advancedEffectsExpanded }) { key -> focus.track(page, key) }
                         }
                         SessionDrawerPage.VR -> {
-                            SteamVrGroup(a) { key -> focus.track(page, key) }
+                            SteamVrGroup(host, a) { key -> focus.track(page, key) }
                             if (!a.glassesOutput) CardboardGroup(host, a) { key -> focus.track(page, key) }
                         }
                         SessionDrawerPage.CONTROLLER -> {
@@ -1391,8 +1392,15 @@ private fun CardboardGroup(host: MenuHost, a: DrawerActions, track: (String) -> 
 }
 
 @Composable
-private fun SteamVrGroup(a: DrawerActions, track: (String) -> Modifier) {
+private fun SteamVrGroup(host: MenuHost, a: DrawerActions, track: (String) -> Modifier) {
+    val context = LocalContext.current
     SettingsGroup(stringResource(R.string.steamvr_title)) {
+        val headset = a.xrHeadset
+        if (headset != null && headset.isImmersiveSupported) {
+            SettingsRow(stringResource(R.string.xr_drawer_headset), xrHeadsetBadgeLabel(headset)) {
+                Chip(stringResource(R.string.xr_badge_ready), ok = true)
+            }
+        }
         val vrLabel = stringResource(R.string.cardboard_steamvr)
         val enterLabel = stringResource(if (a.immersiveSteamVr) R.string.steamvr_enter else R.string.cardboard_steamvr_start)
         @Composable fun button(label: String, text: String, action: String) {
@@ -1413,6 +1421,74 @@ private fun SteamVrGroup(a: DrawerActions, track: (String) -> Modifier) {
             }
             SteamVr.Status.UNAVAILABLE -> SettingsRow(vrLabel, stringResource(R.string.cardboard_steamvr_unavailable)) {}
             null -> SettingsRow(vrLabel, stringResource(R.string.steamvr_checking)) {}
+        }
+    }
+    if (a.immersiveSteamVr) {
+        var qualityPreset by remember(context) {
+            mutableStateOf(com.droiddeck.launcher.session.XrPreferences.getQualityPreset(context))
+        }
+        var refreshRate by remember(context) {
+            mutableStateOf(com.droiddeck.launcher.session.XrPreferences.getRefreshRate(context))
+        }
+        var handTracking by remember(context) {
+            mutableStateOf(com.droiddeck.launcher.session.XrPreferences.isHandTrackingEnabled(context))
+        }
+        SettingsGroup(stringResource(R.string.xr_drawer_settings_group)) {
+            ChoiceRow(
+                host, "drawer-xr-res", stringResource(R.string.xr_standalone_resolution),
+                stringResource(R.string.xr_drawer_settings_note),
+                com.droiddeck.launcher.session.XrQualityPreset.entries.map { it to it.label },
+                qualityPreset, chipModifier = track("xr-res"),
+            ) {
+                com.droiddeck.launcher.session.XrPreferences.setQualityPreset(context, it)
+                qualityPreset = it
+            }
+            ChoiceRow(
+                host, "drawer-xr-hz", stringResource(R.string.xr_standalone_refresh), null,
+                com.droiddeck.launcher.session.XrRefreshRate.entries.map { it to it.label },
+                refreshRate, chipModifier = track("xr-hz"),
+            ) {
+                com.droiddeck.launcher.session.XrPreferences.setRefreshRate(context, it)
+                refreshRate = it
+            }
+            ToggleRow(
+                host, "drawer-xr-hands", stringResource(R.string.xr_standalone_hand_tracking), null,
+                handTracking, chipModifier = track("xr-hands"),
+            ) {
+                com.droiddeck.launcher.session.XrPreferences.setHandTrackingEnabled(context, it)
+                handTracking = it
+            }
+        }
+        val installedStreamers = remember(context) {
+            com.droiddeck.launcher.session.PcvrStreaming.detectInstalledStreamers(context)
+                .filter { it.installedPackage != null }
+        }
+        val alyx = com.droiddeck.launcher.session.PcvrStreaming.HALF_LIFE_ALYX_PRESET
+        SettingsGroup(stringResource(R.string.xr_drawer_pcvr_group)) {
+            SettingsRow(
+                alyx.title,
+                stringResource(
+                    R.string.xr_pcvr_alyx_specs,
+                    alyx.recommendedEyePx,
+                    alyx.recommendedHz,
+                    alyx.recommendedCodec,
+                    alyx.recommendedBitrateMbps,
+                ),
+            ) {}
+            if (installedStreamers.isEmpty()) {
+                SettingsRow(stringResource(R.string.xr_pcvr_streamers_group), stringResource(R.string.xr_drawer_pcvr_none)) {}
+            } else {
+                installedStreamers.forEach { streamer ->
+                    SettingsRow(streamer.name, streamer.notes.ifBlank { null }) {
+                        SecondaryButton(
+                            stringResource(R.string.xr_pcvr_launch),
+                            compact = true,
+                            modifier = track("pcvr-${streamer.id}"),
+                            onClick = { com.droiddeck.launcher.session.PcvrStreaming.launchStreamer(context, streamer) },
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -92,6 +92,7 @@ private val OVERVIEW_TAB = SettingsSection.OVERVIEW.ordinal
 private val PERFORMANCE_TAB = SettingsSection.PERFORMANCE.ordinal
 private val CONTROLLER_TAB = SettingsSection.CONTROLLER.ordinal
 private val GLASSES_TAB = SettingsSection.GLASSES.ordinal
+private val XR_HEADSET_TAB = SettingsSection.XR_HEADSET.ordinal
 private val LAUNCHER_TAB = SettingsSection.LAUNCHER.ordinal
 private val DEVELOPER_TAB = SettingsSection.DEVELOPER.ordinal
 
@@ -691,6 +692,7 @@ internal fun SetupPanel(
                         }
                     }
                     GLASSES_TAB -> GlassesSetupPanel()
+                    XR_HEADSET_TAB -> XrHeadsetPanel()
                 }
             }
         }
