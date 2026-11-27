@@ -4434,7 +4434,7 @@
     <string name="xr_standalone_refresh_hint">Requests display refresh rate via XR_FB_display_refresh_rate when supported.</string>
     <string name="xr_standalone_hand_tracking">Bare-hand tracking fallback</string>
     <string name="xr_standalone_hand_tracking_hint">Synthesizes pinch-to-trigger and grab-to-grip inputs when 6DoF motion controllers are not paired.</string>
-    <string name="xr_standalone_alyx_note">Standalone Half-Life: Alyx automatically applies a low-resolution Vulkan preset (experimental on XR2+ Gen 2). Lightweight VR titles (SUPERHOT VR, HL2 VR, Beat Saber) and VR Cinema run best standalone; use PCVR Streaming above for full-fidelity Half-Life: Alyx.</string>
+    <string name="xr_standalone_alyx_note">Standalone Half-Life: Alyx runs Valve\'s native ARM64 build at its default settings; without it, Alyx runs through Proton with a low-resolution Vulkan preset (experimental on XR2+ Gen 2). Lightweight VR titles (SUPERHOT VR, HL2 VR, Beat Saber) and VR Cinema run best standalone; use PCVR Streaming above for full-fidelity Half-Life: Alyx.</string>
     <string name="xr_drawer_headset">XR headset</string>
     <string name="xr_drawer_pcvr_group">PCVR streaming (Half-Life: Alyx)</string>
     <string name="xr_drawer_pcvr_none">Install Virtual Desktop, Steam Link, WiVRn, or ALVR on this headset for 4K PCVR streaming.</string>

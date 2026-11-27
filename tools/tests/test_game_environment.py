@@ -2772,6 +2772,67 @@ class ProtonDefaultTest(unittest.TestCase):
             self.assertEqual(changes, {})
             self.assertEqual(auto, {})
 
+    def alyx_targets(self, steam, current=None):
+        globals_ = COMPAT["native_targets"].__globals__
+        with mock.patch.dict(globals_, {"appinfo_platforms": lambda _path, wanted: {
+                app: ({"linux", "windows"}, "64", "game") for app in ("546560",) if app in wanted}}):
+            native = COMPAT["native_targets"](str(steam), ["546560"])
+        return COMPAT["arm64_fallbacks"](str(steam), native, current or {})["546560"]
+
+    def install_alyx(self, steam, depot, flags=4, arm64=True):
+        steamapps = steam / "steamapps"
+        steamapps.mkdir(parents=True, exist_ok=True)
+        (steamapps / "appmanifest_546560.acf").write_text(
+            '"AppState"\n{\n\t"appid"\t\t"546560"\n\t"StateFlags"\t\t"%d"\n\t"installdir"\t\t"Half-Life Alyx"\n'
+            '\t"InstalledDepots"\n\t{\n\t\t"%s"\n\t\t{\n\t\t\t"manifest"\t\t"1"\n\t\t\t"size"\t\t"2"\n\t\t}\n\t}\n}\n'
+            % (flags, depot))
+        bin_dir = steamapps / "common/Half-Life Alyx/game/bin"
+        for folder, machine in (("linuxsteamrt64", 62),) + ((("linuxarm64", 183),) if arm64 else ()):
+            (bin_dir / folder).mkdir(parents=True, exist_ok=True)
+            head = bytearray(64)
+            head[0:6] = b"\x7fELF\x02\x01"
+            struct.pack_into("<H", head, 18, machine)
+            (bin_dir / folder / "hlvr").write_bytes(bytes(head))
+
+    def test_alyx_prefers_the_linux_depot_and_its_native_arm64_build(self):
+        fex = COMPAT["FEX_TOOL"]
+        with tempfile.TemporaryDirectory() as tmp:
+            steam = Path(tmp) / "Steam"
+            self.assertEqual(self.alyx_targets(steam), fex)
+            self.install_alyx(steam, "546564")
+            self.assertEqual(self.alyx_targets(steam, {"546560": fex}), fex)
+
+        changes, auto = COMPAT["plan_mapping"](
+            {"0": self.TOOL, "546560": self.TOOL}, ["546560"], self.NAMES, self.TOOL, {"546560": self.TOOL}, {"546560": fex})
+        self.assertEqual(changes, {"546560": fex})
+        changes, auto = COMPAT["plan_mapping"](
+            {"0": self.TOOL, "546560": "GE-Proton11-7"}, ["546560"], self.NAMES, self.TOOL, {}, {"546560": fex})
+        self.assertEqual(changes, {})
+
+    def test_alyx_falls_back_to_proton_without_the_arm64_build(self):
+        fex = COMPAT["FEX_TOOL"]
+        with tempfile.TemporaryDirectory() as tmp:
+            steam = Path(tmp) / "Steam"
+            self.install_alyx(steam, "546564", arm64=False)
+            self.assertIs(self.alyx_targets(steam, {"546560": fex}), COMPAT["NATIVE_CHOICE"])
+            changes, _ = COMPAT["plan_mapping"](
+                {"0": self.TOOL, "546560": fex}, ["546560"], self.NAMES, self.TOOL, {"546560": fex},
+                {"546560": COMPAT["NATIVE_CHOICE"]})
+            self.assertEqual(changes, {"546560": self.TOOL})
+
+            self.install_alyx(steam, "546563", flags=6, arm64=False)
+            self.assertIs(self.alyx_targets(steam, {"546560": self.TOOL}), COMPAT["NATIVE_CHOICE"])
+
+    def test_alyx_keeps_its_side_while_steam_is_still_downloading(self):
+        fex = COMPAT["FEX_TOOL"]
+        with tempfile.TemporaryDirectory() as tmp:
+            steam = Path(tmp) / "Steam"
+            for flags in (2, 6, 1026):
+                self.install_alyx(steam, "546564", flags=flags, arm64=False)
+                self.assertEqual(self.alyx_targets(steam, {"546560": fex}), fex)
+                self.assertEqual(self.alyx_targets(steam, {}), fex)
+                self.assertIs(self.alyx_targets(steam, {"546560": self.TOOL}), COMPAT["NATIVE_CHOICE"])
+
     def test_a_cleared_fex_default_for_a_listed_title_is_kept_as_a_native_choice(self):
         app = "4385780"
         fex = COMPAT["FEX_TOOL"]

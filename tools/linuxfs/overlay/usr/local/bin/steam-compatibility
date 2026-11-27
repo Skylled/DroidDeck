@@ -31,7 +31,11 @@ REQUIRED_TOOLS = (PROTON_ARM64_APPID,) + FEX_DEPENDENCIES
 VALVE_PROTON_ENV = "DD_VALVE_PROTON"
 # Linux builds that bundle an arm64 binary their launcher starts; Steamworks offers no arm64
 # launch-option architecture, so appinfo cannot say so (#1774).
-FEX_DEFAULT_APPS = frozenset({"4385780"})
+FEX_DEFAULT_APPS = frozenset({"4385780", "546560"})
+# Listed titles whose Linux depot only sometimes bundles the arm64 build: (Windows depot, arm64 binary).
+# An install without that binary stays on Proton.
+ARM64_LINUX_BUILDS = {"546560": ("546563", "game/bin/linuxarm64/hlvr")}
+ELF_ARM64 = 183
 FULLY_INSTALLED = 4
 UPDATE_REQUIRED = 2
 REQUEST_HANDOFF_SECONDS = 30
@@ -986,6 +990,71 @@ def native_targets(steam_root, apps):
     return targets
 
 
+def installed_manifest(steam_root, app):
+    for library in libraries(steam_root):
+        try:
+            with open(os.path.join(library, "steamapps", "appmanifest_%s.acf" % app), encoding="utf-8", errors="replace") as f:
+                return library, tokenize(f.read())
+        except OSError:
+            continue
+    return None, None
+
+
+def manifest_value(tokens, key):
+    for i in range(len(tokens) - 1):
+        if tokens[i].lower() == '"%s"' % key.lower() and tokens[i + 1] != "{":
+            return tokens[i + 1].strip('"')
+    return None
+
+
+def installed_depots(tokens):
+    block = find_block(tokens, ["AppState", "InstalledDepots"])
+    if block is None:
+        return set()
+    end, depots, i = block_end(tokens, block), set(), block + 1
+    while i < end:
+        if i + 1 < end and tokens[i + 1] == "{":
+            depots.add(tokens[i].strip('"'))
+            i = block_end(tokens, i + 1) + 1
+        else:
+            i += 1
+    return depots
+
+
+def is_arm64_elf(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return False
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return False
+    return int.from_bytes(head[18:20], "little" if head[5] == 1 else "big") == ELF_ARM64
+
+
+def arm64_build_missing(steam_root, app, tool=""):
+    build = ARM64_LINUX_BUILDS.get(app)
+    if build is None:
+        return False
+    windows_depot, binary = build
+    library, tokens = installed_manifest(steam_root, app)
+    if tokens is None:
+        return False
+    if windows_depot in installed_depots(tokens):
+        return True
+    flags = manifest_flags(tokens)
+    installdir = manifest_value(tokens, "installdir")
+    if not flags & FULLY_INSTALLED or flags & UPDATE_REQUIRED or not installdir:
+        # Mid-download the binary may not be there yet; keep the side Steam is already fetching.
+        return bool(tool) and tool.lower() != FEX_TOOL
+    return not is_arm64_elf(os.path.join(library, "steamapps", "common", installdir, binary))
+
+
+def arm64_fallbacks(steam_root, native, current):
+    return {app: NATIVE_CHOICE if tool == FEX_TOOL and arm64_build_missing(steam_root, app, current.get(app, "")) else tool
+            for app, tool in native.items()}
+
+
 def manifest_text(appid, name, installdir, bare=False):
     title = name.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
     text = ('"AppState"\n{\n' + f'    "appid" "{appid}"\n    "Universe" "1"\n    "name" "{title}"\n'
@@ -994,13 +1063,7 @@ def manifest_text(appid, name, installdir, bare=False):
 
 
 def app_manifest(steam_root, app):
-    for library in libraries(steam_root):
-        try:
-            with open(os.path.join(library, "steamapps", "appmanifest_%s.acf" % app), encoding="utf-8", errors="replace") as f:
-                return tokenize(f.read())
-        except OSError:
-            continue
-    return None
+    return installed_manifest(steam_root, app)[1]
 
 
 def manifest_flags(tokens):
@@ -1654,9 +1717,12 @@ def register_default(config_path, apps=(), protect=(), default=None, catalog=Non
         overrides = requested_games(requests or {}, catalog)
         managed = state.get("auto", {}).keys() if isinstance(state.get("auto"), dict) else ()
         native_choices = state.get("native_choices", ())
-        native = native_targets(steam_root, set(apps) | set(picks) | set(managed) | set(native_choices))
+        native = arm64_fallbacks(steam_root, native_targets(steam_root, set(apps) | set(picks) | set(managed) | set(native_choices)),
+                                 current)
         if linux_tool != FEX_TOOL:
-            native = {app: linux_tool if tool == FEX_TOOL else tool for app, tool in native.items()}
+            # Only droiddeck-fex starts a bundled arm64 build.
+            native = {app: NATIVE_CHOICE if tool == FEX_TOOL and app in ARM64_LINUX_BUILDS
+                      else linux_tool if tool == FEX_TOOL else tool for app, tool in native.items()}
         for app in picked_apps(state) & set(native):
             current.setdefault(app, "")
         changes, auto = plan_mapping(

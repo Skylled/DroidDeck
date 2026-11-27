@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import runpy
+import struct
+import tempfile
 import unittest
 from unittest import mock
 
@@ -81,6 +83,23 @@ class HalfLifeAlyxGameEnvTest(unittest.TestCase):
             _, extra, notes = MODULE["engine_fixes"]("/games/hlvr/hlvr.exe", user_args, "546560")
         self.assertEqual([], extra)
         self.assertFalse(any("Half-Life: Alyx" in n for n in notes))
+
+    def test_native_arm64_build_keeps_valves_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"DROIDDECK_VR_PRESENT": "questwsi"}, clear=False):
+            for folder, machine in (("linuxarm64", 183), ("linuxsteamrt64", 62)):
+                exe = Path(tmp) / "game/bin" / folder / "hlvr"
+                exe.parent.mkdir(parents=True)
+                head = bytearray(64)
+                head[0:6] = b"\x7fELF\x02\x01"
+                struct.pack_into("<H", head, 18, machine)
+                exe.write_bytes(bytes(head))
+            _, extra, notes = MODULE["engine_fixes"](str(Path(tmp) / "game/bin/linuxarm64/hlvr"), ["-vr"], "546560")
+            self.assertEqual([], extra)
+            self.assertFalse(any("Half-Life: Alyx" in n for n in notes))
+            self.assertEqual([], MODULE["engine_fixes"]("/elsewhere/linuxarm64/hlvr", ["-vr"], "546560")[1])
+            _, extra, _ = MODULE["engine_fixes"](str(Path(tmp) / "game/bin/linuxsteamrt64/hlvr"), ["-vr"], "546560")
+            self.assertIn("+vr_render_scale", extra)
 
     def test_does_not_affect_other_games(self):
         with mock.patch.dict(os.environ, {"DROIDDECK_VR_PRESENT": "questwsi"}, clear=False):
