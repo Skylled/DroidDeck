@@ -8,6 +8,11 @@
 class QuestGpuFrames {
 public:
     bool Start(const std::string &filename, EGLDisplay display) {
+        GLint glMajor = 0, glMinor = 0;
+        glGetIntegerv(GL_MAJOR_VERSION, &glMajor);
+        glGetIntegerv(GL_MINOR_VERSION, &glMinor);
+        while (glGetError() != GL_NO_ERROR) {}
+        if (glMajor < 3 || (glMajor == 3 && glMinor < 1)) return false;
         const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
         const char *eglExtensions = eglQueryString(display, EGL_EXTENSIONS);
         if (!extensions || !eglExtensions || !strstr(extensions, "GL_EXT_external_buffer")
@@ -23,10 +28,12 @@ public:
             "void main(){ivec2 p=ivec2(gl_GlobalInvocationID.xy),size=imageSize(target);"
             "if(any(greaterThanEqual(p,size)))return;vec4 value=unpackUnorm4x8(pixels[p.y*size.x+p.x]);"
             "imageStore(target,p,bgra?value.bgra:value);}";
-        GLuint shader = glCreateShader(GL_COMPUTE_SHADER); glShaderSource(shader, 1, &source, nullptr); glCompileShader(shader);
+        GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+        if (!shader) { while (glGetError() != GL_NO_ERROR) {} return false; }
+        glShaderSource(shader, 1, &source, nullptr); glCompileShader(shader);
         program_ = glCreateProgram(); glAttachShader(program_, shader); glLinkProgram(program_); glDeleteShader(shader);
         GLint linked{}; glGetProgramiv(program_, GL_LINK_STATUS, &linked);
-        if (!linked) { Stop(); return false; }
+        if (!linked) { Stop(); while (glGetError() != GL_NO_ERROR) {} return false; }
         lock_ = open((filename + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
         struct stat status{};
         if (lock_ < 0 || fstat(lock_, &status) || !S_ISREG(status.st_mode) || status.st_uid != getuid()

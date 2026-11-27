@@ -11,6 +11,7 @@ internal enum class SettingsSection(val key: String, @StringRes val title: Int) 
     PERFORMANCE("performance", R.string.setup_tab_performance),
     CONTROLLER("controller", R.string.setup_tab_controller),
     GLASSES("glasses", R.string.setup_tab_glasses),
+    XR_HEADSET("xr", R.string.setup_tab_xr),
     LAUNCHER("launcher", R.string.setup_tab_launcher),
     DEVELOPER("developer", R.string.setup_tab_diagnostics);
 
@@ -96,6 +97,10 @@ internal object SettingsIndex {
         SettingsEntry(SettingsPlace.TAB, R.string.rail_decky, tab = "decky", words = listOf("plugins", "plugin store", "homebrew", "loader")),
         SettingsEntry(SettingsPlace.TAB, R.string.rail_boot_movies, tab = "boot-movies", words = listOf("startup movie", "boot video", "animation", "steamdeckrepo")),
         s(SettingsSection.GLASSES, R.string.setup_tab_glasses, "xreal", "viture", "vr", "ar"),
+        s(SettingsSection.XR_HEADSET, R.string.setup_tab_xr, "galaxy xr", "android xr", "quest", "openxr", "steamvr", "vr", "pcvr", "half-life", "alyx", "virtual desktop", "steam link", "wivrn", "alvr"),
+        s(SettingsSection.XR_HEADSET, R.string.xr_standalone_resolution, "vr", "xr", "galaxy xr", "steamvr", "resolution", "eye"),
+        s(SettingsSection.XR_HEADSET, R.string.xr_standalone_refresh, "vr", "xr", "hz", "60", "72", "90", "refresh"),
+        s(SettingsSection.XR_HEADSET, R.string.xr_standalone_hand_tracking, "vr", "xr", "hands", "pinch", "controllers"),
 
         s(SettingsSection.LAUNCHER, R.string.setup_theme, "color", "dark"),
         s(SettingsSection.LAUNCHER, R.string.setup_app_scale, "size", "zoom"),

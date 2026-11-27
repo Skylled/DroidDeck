@@ -4,6 +4,14 @@
 
     <queries>
         <package android:name="cn.nubia.gamelauncher" />
+        <package android:name="VirtualDesktop.Android" />
+        <package android:name="com.virtualdesktop.android" />
+        <package android:name="com.valvesoftware.steamlink" />
+        <package android:name="org.meumeu.wivrn" />
+        <package android:name="io.github.wivrn.wivrn" />
+        <package android:name="alvr.client.stable" />
+        <package android:name="alvr.client.nightly" />
+        <package android:name="alvr.client" />
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
@@ -59,6 +67,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.HAND_TRACKING" />
+    <uses-permission android:name="android.permission.EYE_TRACKING_COARSE" />
 
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
@@ -66,6 +76,9 @@
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="false" />
+    <uses-feature android:name="android.software.xr.api.openxr" android:required="false" />
+    <uses-feature android:name="android.software.xr.api.spatial" android:required="false" />
+    <uses-feature android:name="android.hardware.xr.input.controller" android:required="false" />
 
     <application
         android:name=".App"
@@ -111,6 +124,9 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
             <meta-data android:name="android.app.lib_name" android:value="droiddeckxr" />
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
             <intent-filter>
                 <action android:name="com.droiddeck.launcher.XR" />
                 <category android:name="com.oculus.intent.category.VR" />
@@ -146,6 +162,9 @@
             android:screenOrientation="user"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation">
             <layout android:defaultWidth="1024dp" android:defaultHeight="640dp" />
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_HOME_SPACE" />
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -292,7 +311,11 @@
             android:preferMinimalPostProcessing="true"
             android:screenOrientation="sensorLandscape"
             android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density" />
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_HOME_SPACE" />
+        </activity>
 
         <activity
             android:name=".ui.DualScreenActivity"

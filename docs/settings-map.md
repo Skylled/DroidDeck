@@ -34,6 +34,10 @@ Links of the form `droiddeck://settings/<section>` open a Settings section direc
 | Host name | Settings › Performance (`droiddeck://settings/performance`) | name |
 | Controller | Settings › Controller (`droiddeck://settings/controller`) | gamepad, buttons, mapping, profile, remap |
 | Smart glasses | Settings › Smart glasses (`droiddeck://settings/glasses`) | xreal, viture, vr, ar |
+| XR headset | Settings › XR headset (`droiddeck://settings/xr`) | galaxy xr, android xr, quest, openxr, steamvr, vr, pcvr, half-life, alyx, virtual desktop, steam link, wivrn, alvr |
+| Eye render resolution cap | Settings › XR headset (`droiddeck://settings/xr`) | vr, xr, galaxy xr, steamvr, resolution, eye |
+| Target refresh rate | Settings › XR headset (`droiddeck://settings/xr`) | vr, xr, hz, 60, 72, 90, refresh |
+| Bare-hand tracking fallback | Settings › XR headset (`droiddeck://settings/xr`) | vr, xr, hands, pinch, controllers |
 | Theme | Settings › Launcher (`droiddeck://settings/launcher`) | color, dark |
 | App scale | Settings › Launcher (`droiddeck://settings/launcher`) | size, zoom |
 | App icon | Settings › Launcher (`droiddeck://settings/launcher`) |  |

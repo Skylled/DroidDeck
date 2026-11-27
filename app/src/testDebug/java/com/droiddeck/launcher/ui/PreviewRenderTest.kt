@@ -4,7 +4,20 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.view.inspector.WindowInspector
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.unit.dp
+import com.droiddeck.launcher.session.DiscoveredHost
+import com.droiddeck.launcher.session.StreamerApp
+import com.droiddeck.launcher.session.XrHeadsetInfo
+import com.droiddeck.launcher.session.XrHeadsetKind
+import com.droiddeck.launcher.session.XrQualityPreset
+import com.droiddeck.launcher.session.XrRefreshRate
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -57,7 +70,77 @@ internal class PreviewRenderTest(private val case: PreviewCase) {
     }
 
     companion object {
+        private val xrPreviewCases: List<PreviewCase> = listOf(
+            PreviewCase("xr-headset-galaxy") {
+                PreviewHost {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 22.dp, vertical = 18.dp),
+                    ) {
+                        XrHeadsetPanelContent(
+                            headset = XrHeadsetInfo(
+                                kind = XrHeadsetKind.ANDROID_XR,
+                                displayName = "Samsung Galaxy XR",
+                                isGalaxyXr = true,
+                                isImmersiveSupported = true,
+                                supportsHandTrackingFeature = true,
+                            ),
+                            streamers = listOf(
+                                StreamerApp(
+                                    id = "virtual_desktop",
+                                    name = "Virtual Desktop",
+                                    packageNames = listOf("VirtualDesktop.Android"),
+                                    installedPackage = "VirtualDesktop.Android",
+                                    supportsWindows = true,
+                                    supportsLinux = false,
+                                    notes = "HEVC 10-bit / AV1, Wi-Fi 7",
+                                ),
+                                StreamerApp(
+                                    id = "steam_link",
+                                    name = "Steam Link",
+                                    packageNames = listOf("com.valvesoftware.steamlink"),
+                                    installedPackage = "com.valvesoftware.steamlink",
+                                    supportsWindows = true,
+                                    supportsLinux = true,
+                                    notes = "Direct SteamVR streaming",
+                                ),
+                                StreamerApp(
+                                    id = "wivrn",
+                                    name = "WiVRn",
+                                    packageNames = listOf("org.meumeu.wivrn"),
+                                    installedPackage = null,
+                                    supportsWindows = false,
+                                    supportsLinux = true,
+                                    notes = "Open-source Monado PCVR",
+                                ),
+                                StreamerApp(
+                                    id = "alvr",
+                                    name = "ALVR",
+                                    packageNames = listOf("alvr.client.stable"),
+                                    installedPackage = "alvr.client.stable",
+                                    supportsWindows = true,
+                                    supportsLinux = true,
+                                    notes = "Open-source SteamVR over LAN / USB",
+                                ),
+                            ),
+                            discoveredHosts = listOf(
+                                DiscoveredHost("Gaming-PC", "192.168.1.42", 9757, "WiVRn"),
+                                DiscoveredHost("Alyx-Rig", "192.168.1.42", 9943, "ALVR"),
+                            ),
+                            scanning = true,
+                            manualHost = "192.168.1.42",
+                            qualityPreset = XrQualityPreset.BALANCED,
+                            refreshRate = XrRefreshRate.HZ_72,
+                            handTrackingEnabled = true,
+                        )
+                    }
+                }
+            },
+        )
+
         @JvmStatic @Parameters(name = "{0}")
-        fun cases(): List<Array<Any>> = previewCases.map { arrayOf(it) }
+        fun cases(): List<Array<Any>> = (previewCases + xrPreviewCases).map { arrayOf(it) }
     }
 }
