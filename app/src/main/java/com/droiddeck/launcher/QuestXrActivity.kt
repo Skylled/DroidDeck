@@ -28,9 +28,15 @@ class QuestXrActivity : NativeActivity() {
     @Volatile private var closing = false
     @Volatile private var steamVrStatus = SteamVr.Status.UNAVAILABLE
     private var sessionId: String? = null
+    @Volatile private var activeFailure: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         sessionId = SessionState.sessionId
+        Log.i(
+            TAG,
+            "onCreate: sessionRunning=${SessionState.running} compositorStarted=${CompositorHost.isStarted} " +
+                "androidXr=${XrHeadset.isAndroidXr(this)}",
+        )
         SessionService.setXrActivityVisible(this, true)
         if (XrHeadset.isAndroidXr(this) &&
             XrPreferences.isHandTrackingEnabled(this) &&
@@ -78,18 +84,39 @@ class QuestXrActivity : NativeActivity() {
 
     @Keep
     fun onXrActive(active: Boolean) {
-        if (active) {
-            check(CompositorHost.isStarted) { "DroidDeck compositor is not running" }
-            SessionService.resume(this)
-            WaylandCompositor.nativeSetCardboard(false, 1, 0.064f, 3f, 4f, 0f, 0f, 90f, 0f, 0f, false, 0f)
-            WaylandCompositor.nativeSetFrameGenArmed(false, 0, 0)
-            WaylandCompositor.nativeSetZeroCopy(false)
-            CompositorHost.attachXr()
-            WaylandCompositor.nativeVsync(System.nanoTime())
-            check(WaylandCompositor.nativeWaitSurface(3000)) { "XR frame GPU handshake timed out" }
+        val started = SystemClock.elapsedRealtime()
+        fun elapsed() = SystemClock.elapsedRealtime() - started
+        try {
+            if (active) {
+                check(CompositorHost.isStarted) { "DroidDeck compositor is not running" }
+                SessionService.resume(this)
+                WaylandCompositor.nativeSetCardboard(false, 1, 0.064f, 3f, 4f, 0f, 0f, 90f, 0f, 0f, false, 0f)
+                WaylandCompositor.nativeSetFrameGenArmed(false, 0, 0)
+                WaylandCompositor.nativeSetZeroCopy(false)
+                Log.i(TAG, "onXrActive: attaching compositor at ${elapsed()} ms")
+                CompositorHost.attachXr()
+                WaylandCompositor.nativeVsync(System.nanoTime())
+                Log.i(TAG, "onXrActive: waiting for the compositor surface at ${elapsed()} ms")
+                check(WaylandCompositor.nativeWaitSurface(3000)) {
+                    "the compositor did not release its screen surface within 3 s"
+                }
+            }
+            SessionService.setXrActivityVisible(this, active)
+            if (active) startSteamVr()
+            Log.i(TAG, "onXrActive($active) done in ${elapsed()} ms")
+        } catch (failure: Throwable) {
+            activeFailure = failure.message ?: failure.javaClass.simpleName
+            Log.e(TAG, "onXrActive($active) failed after ${elapsed()} ms", failure)
+            throw failure
         }
-        SessionService.setXrActivityVisible(this, active)
-        if (active) startSteamVr()
+    }
+
+    @Keep
+    fun onXrFatal(message: String) {
+        val reason = activeFailure?.let { "$message: $it" } ?: message
+        Log.e(TAG, "XR session failed: $reason")
+        closing = true
+        runOnUiThread { Toast.makeText(applicationContext, "DroidDeck XR: $reason", Toast.LENGTH_LONG).show() }
     }
 
     private fun startSteamVr() {
@@ -97,12 +124,18 @@ class QuestXrActivity : NativeActivity() {
             steamVrStarted = true
             Thread({
                 try {
+                    val requested = SystemClock.elapsedRealtime()
                     val started = synchronized(steamVrLock) {
                         if (closing || !sessionAlive()) false else {
                             steamVrOwner = this
                             SteamVr.run(this, "start")
                         }
                     }
+                    Log.i(
+                        TAG,
+                        "SteamVR start returned $started after ${SystemClock.elapsedRealtime() - requested} ms " +
+                            "(closing=$closing sessionAlive=${sessionAlive()})",
+                    )
                     if (!started) {
                         if (!closing) leaveXr("SteamVR start failed", sessionAlive())
                         return@Thread
@@ -114,7 +147,9 @@ class QuestXrActivity : NativeActivity() {
                             leaveXr("Steam session ended", false)
                             break
                         }
-                        steamVrStatus = SteamVr.status(this)
+                        val status = SteamVr.status(this)
+                        if (status != steamVrStatus) Log.i(TAG, "SteamVR status $steamVrStatus -> $status")
+                        steamVrStatus = status
                         val now = SystemClock.elapsedRealtime()
                         if (steamVrStatus == SteamVr.Status.RUNNING) lastRunning = now
                         val deadline = lastRunning?.plus(5_000) ?: startupDeadline
@@ -157,12 +192,19 @@ class QuestXrActivity : NativeActivity() {
     fun onXrStatus(): Int = steamVrStatus.ordinal
 
     override fun onDestroy() {
+        Log.i(TAG, "onDestroy")
         closing = true
         SessionService.setXrActivityVisible(this, false)
         super.onDestroy()
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (!closing) SessionService.setXrActivityVisible(this, true)
+    }
+
     override fun onStop() {
+        Log.i(TAG, "onStop: closing=$closing finishing=$isFinishing")
         SessionService.setXrActivityVisible(this, false)
         super.onStop()
     }

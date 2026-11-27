@@ -6206,6 +6206,11 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback, com.droidde
 
     private fun steamVrAction(action: String) {
         if (action == "start" && com.droiddeck.launcher.session.XrHeadset.isImmersiveSupported(this)) {
+            android.util.Log.i(
+                "DroidDeckXR",
+                "entering immersive SteamVR: sessionRunning=${SessionState.running} " +
+                    "compositorStarted=${com.droiddeck.launcher.wayland.CompositorHost.isStarted} steamVr=$steamVrStatus",
+            )
             startActivity(android.content.Intent(this, QuestXrActivity::class.java))
             return
         }
