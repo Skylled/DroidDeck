@@ -6,6 +6,8 @@
 #include <time.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include <openxr/openxr_reflection.h>
+#include <algorithm>
 #include <array>
 #include <vector>
 #include <utility>
@@ -27,9 +29,27 @@
 #include "xr_frame_math.h"
 #include "xr_android_xr.h"
 #include "gpu_frames.h"
+#include "xr_stall.h"
+
+#define DROIDDECK_XR_ENUM_NAME(name, value) case name: return #name;
+static const char *resultName(XrResult result) {
+    switch (result) { XR_LIST_ENUM_XrResult(DROIDDECK_XR_ENUM_NAME) default: return "XR_RESULT_UNKNOWN"; }
+}
+static const char *stateName(XrSessionState state) {
+    switch (state) { XR_LIST_ENUM_XrSessionState(DROIDDECK_XR_ENUM_NAME) default: return "XR_SESSION_STATE_?"; }
+}
+#undef DROIDDECK_XR_ENUM_NAME
 
 static void check(XrResult result, const char *operation) {
-    if (XR_FAILED(result)) throw std::runtime_error(std::string(operation) + ": " + std::to_string(result));
+    if (XR_FAILED(result))
+        throw std::runtime_error(std::string(operation) + ": " + resultName(result) + " (" + std::to_string(result) + ")");
+}
+
+static XrStallWatchdog gWatchdog;
+
+static int64_t monotonicMs() {
+    timespec now{}; clock_gettime(CLOCK_MONOTONIC, &now);
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
 struct Eye {
@@ -45,26 +65,54 @@ public:
 
     void run() {
         initialize();
+        const int64_t readyAt = monotonicMs();
+        int64_t idleLogged = readyAt;
+        __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "init done, waiting for session READY");
         while (!app_->destroyRequested && !exit_) {
             android_poll_source *source = nullptr;
             int events = 0;
             int pollTimeout = running_ ? 0 : 100;
+            gWatchdog.Enter("looper");
+            if (!running_ && monotonicMs() - idleLogged >= 5000) {
+                idleLogged = monotonicMs();
+                __android_log_print(ANDROID_LOG_WARN, "DroidDeckXR",
+                    "session not running, state=%s, %lld ms since init", stateName(state_),
+                    (long long)(idleLogged - readyAt));
+            }
             for (int eventCount = 0; eventCount < 32; eventCount++) {
                 if (ALooper_pollOnce(pollTimeout, nullptr, &events, reinterpret_cast<void **>(&source)) < 0) break;
                 if (source) source->process(app_, source);
                 if (app_->destroyRequested) break;
                 pollTimeout = 0;
             }
+            gWatchdog.Enter("receiveFrame");
             receiveFrame();
+            gWatchdog.Enter("xrPollEvent");
             pollEvents();
             if (running_ && !app_->destroyRequested) frame();
         }
-        if (exit_ && !app_->destroyRequested) ANativeActivity_finish(app_->activity);
+        __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "XR loop ended: exit=%d destroyRequested=%d state=%s frames=%llu rendered=%llu",
+            exit_, app_->destroyRequested, stateName(state_), (unsigned long long)frames_, (unsigned long long)rendered_);
+    }
+
+    void fail(const char *error) {
+        health(error);
+        if (!env_) return;
+        jclass activityClass = env_->GetObjectClass(app_->activity->clazz);
+        jmethodID fatal = env_->GetMethodID(activityClass, "onXrFatal", "(Ljava/lang/String;)V");
+        if (fatal && !env_->ExceptionCheck()) {
+            jstring text = env_->NewStringUTF(error);
+            env_->CallVoidMethod(app_->activity->clazz, fatal, text);
+            env_->DeleteLocalRef(text);
+        }
+        if (env_->ExceptionCheck()) env_->ExceptionClear();
+        env_->DeleteLocalRef(activityClass);
     }
 
     void health(const char *error = "") {
+        if (!app_->activity->externalDataPath) return;
         int steamvrState = -1;
-        if (statusCallback_) {
+        if (env_ && statusCallback_) {
             steamvrState = env_->CallIntMethod(app_->activity->clazz, statusCallback_);
             if (env_->ExceptionCheck()) { env_->ExceptionClear(); steamvrState = -1; }
         }
@@ -155,6 +203,21 @@ private:
     std::array<Eye, 2> eyes_;
     GLuint framebuffer_ = 0, vertexArray_ = 0;
     GLint sourceEncoding_ = 0, eyeEncoding_ = 0;
+    XrEnvironmentBlendMode blendMode_ = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    bool lastShouldRender_ = false, lastValid_ = false;
+
+    void stage(const char *name) {
+        gWatchdog.Enter(name);
+        __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "init: %s", name);
+        android_poll_source *source = nullptr;
+        int events = 0;
+        for (int eventCount = 0; eventCount < 32; eventCount++) {
+            if (ALooper_pollOnce(0, nullptr, &events, reinterpret_cast<void **>(&source)) < 0) break;
+            if (source) source->process(app_, source);
+            source = nullptr;
+            if (app_->destroyRequested) throw std::runtime_error("activity destroyed during XR init");
+        }
+    }
 
     std::string captureRequest() {
         if (frames_ % 9) return {};
@@ -249,6 +312,7 @@ private:
             return 1;
         };
         app_->activity->vm->AttachCurrentThread(&env_, nullptr);
+        stage("activity bridge");
         jclass activityClass = env_->GetObjectClass(app_->activity->clazz);
         jmethodID getIntent = env_->GetMethodID(activityClass, "getIntent", "()Landroid/content/Intent;");
         jobject intent = env_->CallObjectMethod(app_->activity->clazz, getIntent);
@@ -289,6 +353,7 @@ private:
         runtimeInfoCallback_ = env_->GetMethodID(activityClass, "onXrRuntimeInfo", "(Ljava/lang/String;IIFZ)V");
         if (env_->ExceptionCheck()) { env_->ExceptionClear(); runtimeInfoCallback_ = nullptr; }
         env_->DeleteLocalRef(intentClass); env_->DeleteLocalRef(intent); env_->DeleteLocalRef(activityClass);
+        stage("xrInitializeLoaderKHR");
         PFN_xrInitializeLoaderKHR initializeLoader = nullptr;
         check(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
             reinterpret_cast<PFN_xrVoidFunction *>(&initializeLoader)), "loader init entrypoint");
@@ -296,10 +361,24 @@ private:
         loader.applicationVM = app_->activity->vm;
         loader.applicationContext = app_->activity->clazz;
         check(initializeLoader(reinterpret_cast<XrLoaderInitInfoBaseHeaderKHR *>(&loader)), "xrInitializeLoaderKHR");
+        stage("xrEnumerateInstanceExtensionProperties");
         uint32_t count = 0;
         check(xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr), "extensions count");
         std::vector<XrExtensionProperties> extensions(count, {XR_TYPE_EXTENSION_PROPERTIES});
         check(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, extensions.data()), "extensions");
+        bool glesSupported = false;
+        std::string extensionLine;
+        for (const auto &extension : extensions) {
+            if (!std::strcmp(extension.extensionName, XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME)) glesSupported = true;
+            if (extensionLine.size() + std::strlen(extension.extensionName) > 900) {
+                __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "runtime extensions:%s", extensionLine.c_str());
+                extensionLine.clear();
+            }
+            extensionLine += ' ';
+            extensionLine += extension.extensionName;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "runtime extensions (%u):%s", count, extensionLine.c_str());
+        if (!glesSupported) throw std::runtime_error("OpenXR runtime does not offer XR_KHR_opengl_es_enable");
         for (const auto &extension : extensions) {
             if (!std::strcmp(extension.extensionName, XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME))
                 timespecSupported_ = true;
@@ -325,7 +404,15 @@ private:
         create.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
         create.enabledExtensionCount = enabled.size();
         create.enabledExtensionNames = enabled.data();
+        stage("xrCreateInstance");
         check(xrCreateInstance(&create, &instance_), "xrCreateInstance");
+        {
+            XrInstanceProperties properties{XR_TYPE_INSTANCE_PROPERTIES};
+            if (XR_SUCCEEDED(xrGetInstanceProperties(instance_, &properties)))
+                __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "runtime %s %u.%u.%u", properties.runtimeName,
+                    XR_VERSION_MAJOR(properties.runtimeVersion), XR_VERSION_MINOR(properties.runtimeVersion),
+                    XR_VERSION_PATCH(properties.runtimeVersion));
+        }
         if (performanceSupported_) {
             XrResult result = xrGetInstanceProcAddr(instance_, "xrPerfSettingsSetPerformanceLevelEXT",
                 reinterpret_cast<PFN_xrVoidFunction *>(&setPerformance_));
@@ -351,7 +438,24 @@ private:
         }
         XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
         systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+        stage("xrGetSystem");
         check(xrGetSystem(instance_, &systemInfo, &system_), "xrGetSystem");
+        {
+            uint32_t modeCount = 0;
+            std::vector<XrEnvironmentBlendMode> modes;
+            if (XR_SUCCEEDED(xrEnumerateEnvironmentBlendModes(instance_, system_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                    0, &modeCount, nullptr)) && modeCount) {
+                modes.resize(modeCount);
+                if (XR_FAILED(xrEnumerateEnvironmentBlendModes(instance_, system_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                        modeCount, &modeCount, modes.data()))) modes.clear();
+                else modes.resize(modeCount);
+            }
+            if (!modes.empty() && std::find(modes.begin(), modes.end(), XR_ENVIRONMENT_BLEND_MODE_OPAQUE) == modes.end())
+                blendMode_ = modes.front();
+            std::string list;
+            for (auto mode : modes) list += " " + std::to_string(mode);
+            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "blend modes:%s using=%d", list.c_str(), blendMode_);
+        }
         {
             XrSystemHandTrackingPropertiesEXT handProps{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
             XrSystemProperties systemProps{XR_TYPE_SYSTEM_PROPERTIES};
@@ -369,6 +473,7 @@ private:
         if (requirements.minApiVersionSupported > XR_MAKE_VERSION(3, 0, 0)
             || requirements.maxApiVersionSupported < XR_MAKE_VERSION(3, 0, 0))
             throw std::runtime_error("Runtime does not support GLES 3.0");
+        stage("EGL context");
         display_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
         if (!eglInitialize(display_, nullptr, nullptr)) throw std::runtime_error("eglInitialize failed");
         const EGLint attributes[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT | EGL_WINDOW_BIT,
@@ -386,7 +491,9 @@ private:
         binding.display = display_; binding.config = config; binding.context = context_;
         XrSessionCreateInfo sessionInfo{XR_TYPE_SESSION_CREATE_INFO};
         sessionInfo.next = &binding; sessionInfo.systemId = system_;
+        stage("xrCreateSession");
         check(xrCreateSession(instance_, &sessionInfo, &session_), "xrCreateSession");
+        stage("reference spaces");
         XrReferenceSpaceCreateInfo reference{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
         reference.poseInReferenceSpace.orientation.w = 1;
         reference.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
@@ -399,19 +506,27 @@ private:
         reference.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
         reference.poseInReferenceSpace.position.y = 0;
         check(xrCreateReferenceSpace(session_, &reference, &view_), "view space");
+        stage("actions");
         initializeActions();
+        stage("refresh rate");
         configureRefreshRate();
+        stage("hand tracking");
         initializeHandTracking();
+        stage("swapchains");
         initializeImages();
         notifyRuntimeInfo();
+        stage("shaders");
         initializeGraphics();
+        stage("tracking files");
         initializeTracking();
+        stage("frame channels");
         {
             std::string filename = std::string(app_->activity->internalDataPath) + "/.wayland-rt/" DROIDDECK_XR_FRAME_SOCKET;
             if (!receiver_.Start(filename)) throw std::runtime_error("XR frame receiver unavailable");
             bool gpu = !verifyPixels_ && gpuFrames_.Start(std::string(app_->activity->internalDataPath) + "/.wayland-rt/" DROIDDECK_XR_GPU_SOCKET, display_);
             __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "GPU frame channel available=%d", gpu);
         }
+        stage("health");
         health();
     }
 
@@ -587,6 +702,8 @@ private:
             create.faceCount = 1; create.arraySize = 1; create.mipCount = 1;
             check(xrCreateSwapchain(session_, &create, &target.swapchain), "swapchain");
             check(xrEnumerateSwapchainImages(target.swapchain, 0, &count, nullptr), "image count");
+            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "eye %d swapchain %dx%d format=0x%llx images=%u",
+                eye, target.width, target.height, (long long)format, count);
             target.images.resize(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
             check(xrEnumerateSwapchainImages(target.swapchain, count, &count,
                 reinterpret_cast<XrSwapchainImageBaseHeader *>(target.images.data())), "images");
@@ -657,10 +774,15 @@ private:
 
     void attachGuest(bool attach) {
         if (attach == guestAttached_) return;
+        if (!env_ || !activeCallback_) return;
+        gWatchdog.Enter(attach ? "onXrActive(true)" : "onXrActive(false)");
+        const int64_t started = monotonicMs();
         env_->CallVoidMethod(app_->activity->clazz, activeCallback_, static_cast<jboolean>(attach));
         if (env_->ExceptionCheck()) {
             env_->ExceptionDescribe(); env_->ExceptionClear(); throw std::runtime_error("Guest XR handshake failed");
         }
+        __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "onXrActive(%d) returned after %lld ms",
+            attach, (long long)(monotonicMs() - started));
         guestAttached_ = attach;
     }
 
@@ -718,6 +840,9 @@ private:
     void receiveFrame() {
         if (gpuFrames_.Take(sourceHeader_, sourceTexture_)) {
             uploadedFrames_++;
+            if (uploadedFrames_ == 1)
+                __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "first guest frame (gpu) %ux%u id=%llu",
+                    sourceHeader_.width, sourceHeader_.height, (unsigned long long)sourceHeader_.frame_id);
             if (uploadedFrames_ % 72 == 1) health();
             return;
         }
@@ -749,6 +874,9 @@ private:
         sourceHeader_ = frame.header;
         receiver_.Recycle(std::move(frame.pixels));
         uploadedFrames_++;
+        if (uploadedFrames_ == 1)
+            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "first guest frame (cpu) %ux%u id=%llu",
+                sourceHeader_.width, sourceHeader_.height, (unsigned long long)sourceHeader_.frame_id);
         if (verifyPixels_ || uploadedFrames_ % 72 == 1) health();
     }
 
@@ -776,11 +904,13 @@ private:
         while ((result = xrPollEvent(instance_, &event)) == XR_SUCCESS) {
             if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
                 state_ = reinterpret_cast<XrEventDataSessionStateChanged *>(&event)->state;
-                __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "session state=%d", state_);
+                __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "session state=%d %s frames=%llu", state_, stateName(state_),
+                    (unsigned long long)frames_);
                 attachGuest(state_ == XR_SESSION_STATE_VISIBLE || state_ == XR_SESSION_STATE_FOCUSED);
                 if (state_ == XR_SESSION_STATE_READY) {
                     XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
                     begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                    gWatchdog.Enter("xrBeginSession");
                     check(xrBeginSession(session_, &begin), "xrBeginSession"); running_ = true;
                     if (setPerformance_) {
                         for (auto domain : {XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_DOMAIN_GPU_EXT}) {
@@ -789,6 +919,7 @@ private:
                         }
                     }
                 } else if (state_ == XR_SESSION_STATE_STOPPING) {
+                    gWatchdog.Enter("xrEndSession");
                     check(xrEndSession(session_), "xrEndSession"); running_ = false;
                     if (quitRequested_) exit_ = true;
                 } else if (state_ == XR_SESSION_STATE_EXITING || state_ == XR_SESSION_STATE_LOSS_PENDING) exit_ = true;
@@ -807,9 +938,17 @@ private:
     void frame() {
         XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
         XrFrameState frameState{XR_TYPE_FRAME_STATE};
+        gWatchdog.Enter("xrWaitFrame");
         check(xrWaitFrame(session_, &wait, &frameState), "xrWaitFrame");
         period_ = frameState.predictedDisplayPeriod;
+        gWatchdog.Enter("xrBeginFrame");
         XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO}; check(xrBeginFrame(session_, &begin), "xrBeginFrame");
+        if (frames_ == 0 || (frameState.shouldRender == XR_TRUE) != lastShouldRender_) {
+            lastShouldRender_ = frameState.shouldRender == XR_TRUE;
+            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "frame %llu shouldRender=%d period=%lld state=%s",
+                (unsigned long long)frames_, lastShouldRender_, (long long)period_, stateName(state_));
+        }
+        gWatchdog.Enter("input and poses");
         check(xrLocateSpace(view_, world_, frameState.predictedDisplayTime, &head_), "head pose");
         if (state_ == XR_SESSION_STATE_FOCUSED) {
             XrActiveActionSet active{actions_, XR_NULL_PATH};
@@ -890,6 +1029,7 @@ private:
         check(xrLocateViews(session_, &locate, &viewState, 2, &count, views), "xrLocateViews");
         publishTracking(views, frameState.predictedDisplayTime);
         if (guestAttached_) {
+            gWatchdog.Enter("onXrFrame");
             timespec now{}; clock_gettime(CLOCK_MONOTONIC, &now);
             env_->CallVoidMethod(app_->activity->clazz, frameCallback_, (jlong)now.tv_sec * 1000000000LL + now.tv_nsec);
             if (env_->ExceptionCheck()) { env_->ExceptionClear(); throw std::runtime_error("Guest frame callback failed"); }
@@ -907,6 +1047,15 @@ private:
                 views[eye].fov = {source.fov[0], source.fov[1], source.fov[2], source.fov[3]};
             }
         }
+        if (frames_ == 0 || valid != lastValid_) {
+            lastValid_ = valid;
+            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR",
+                "frame %llu submitting %s: shouldRender=%d views=%u viewFlags=%llu guestFrameId=%llu guestFrameAgeMs=%lld",
+                (unsigned long long)frames_, valid ? "guest layer" : "no layer", frameState.shouldRender, count,
+                (unsigned long long)viewState.viewStateFlags, (unsigned long long)sourceHeader_.frame_id,
+                sourceHeader_.frame_id ? (long long)((xr_frame_now() - sourceHeader_.captured_ns) / 1000000) : -1LL);
+        }
+        gWatchdog.Enter("render");
         const std::string capture = captureRequest();
         bool captured = valid;
         if (!capture.empty() && valid)
@@ -914,6 +1063,7 @@ private:
         if (valid) for (int eye = 0; eye < 2; eye++) {
             uint32_t image = 0;
             XrSwapchainImageAcquireInfo acquire{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            gWatchdog.Enter("xrWaitSwapchainImage");
             check(xrAcquireSwapchainImage(eyes_[eye].swapchain, &acquire, &image), "acquire image");
             XrSwapchainImageWaitInfo imageWait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO}; imageWait.timeout = XR_INFINITE_DURATION;
             check(xrWaitSwapchainImage(eyes_[eye].swapchain, &imageWait), "wait image");
@@ -929,19 +1079,24 @@ private:
         layer.space = world_; layer.viewCount = 2; layer.views = projection;
         const XrCompositionLayerBaseHeader *layers[] = {reinterpret_cast<XrCompositionLayerBaseHeader *>(&layer)};
         XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO}; end.displayTime = frameState.predictedDisplayTime;
-        end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE; end.layerCount = valid ? 1 : 0; end.layers = layers;
+        end.environmentBlendMode = blendMode_; end.layerCount = valid ? 1 : 0; end.layers = layers;
+        gWatchdog.Enter("xrEndFrame");
         check(xrEndFrame(session_, &end), "xrEndFrame");
+        if (frames_ == 0) __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "first xrEndFrame ok");
         if (!capture.empty()) captureResult(capture, captured, valid, projection, frameState.predictedDisplayTime);
         frames_++; if (valid) rendered_++;
         if (frames_ % 72 == 0) {
             health();
-            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "frames=%llu rendered=%llu head=%llu hands=%d,%d period=%lld",
-                (unsigned long long)frames_, (unsigned long long)rendered_, (unsigned long long)head_.locationFlags,
+            __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR",
+                "frames=%llu rendered=%llu guestFrames=%llu state=%s head=%llu hands=%d,%d period=%lld",
+                (unsigned long long)frames_, (unsigned long long)rendered_, (unsigned long long)uploadedFrames_,
+                stateName(state_), (unsigned long long)head_.locationFlags,
                 handActive_[0], handActive_[1], (long long)period_);
         }
     }
 
     void cleanup() {
+        gWatchdog.Enter("cleanup");
         receiver_.Stop();
         gpuFrames_.Stop();
         try { attachGuest(false); } catch (const std::exception &error) {
@@ -977,12 +1132,35 @@ private:
     }
 };
 
-void android_main(android_app *app) {
-    QuestXR runtime(app);
-    try { runtime.run(); }
-    catch (const std::exception &error) {
-        __android_log_print(ANDROID_LOG_ERROR, "DroidDeckXR", "%s", error.what());
-        runtime.health(error.what());
-        ANativeActivity_finish(app->activity);
+// native_app_glue blocks the UI thread inside every lifecycle, window and input callback until this
+// thread handles the command, with no timeout. Returning before APP_CMD_DESTROY leaves the UI thread
+// waiting forever, which Android reports as an ANR.
+static void finishAndDrain(android_app *app) {
+    app->onInputEvent = nullptr;
+    app->userData = nullptr;
+    if (!app->destroyRequested) ANativeActivity_finish(app->activity);
+    while (!app->destroyRequested) {
+        android_poll_source *source = nullptr;
+        int events = 0;
+        if (ALooper_pollOnce(250, nullptr, &events, reinterpret_cast<void **>(&source)) >= 0 && source)
+            source->process(app, source);
     }
+    __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "native thread exiting after destroy");
+}
+
+void android_main(android_app *app) {
+    __android_log_print(ANDROID_LOG_INFO, "DroidDeckXR", "android_main start");
+    gWatchdog.Start([](const char *stage, int64_t elapsedMs) {
+        __android_log_print(ANDROID_LOG_WARN, "DroidDeckXR", "XR thread stalled %lld ms in %s", (long long)elapsedMs, stage);
+    });
+    {
+        QuestXR runtime(app);
+        try { runtime.run(); }
+        catch (const std::exception &error) {
+            __android_log_print(ANDROID_LOG_ERROR, "DroidDeckXR", "fatal in %s: %s", gWatchdog.Stage(), error.what());
+            runtime.fail(error.what());
+        }
+    }
+    gWatchdog.Stop();
+    finishAndDrain(app);
 }
