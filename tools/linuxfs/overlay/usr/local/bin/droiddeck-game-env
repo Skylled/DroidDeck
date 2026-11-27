@@ -226,9 +226,23 @@ def little_nightmares_threads(game):
         return {"PROTONFIXES_DISABLE": "1"}, [], "Little Nightmares: umu-protonfixes off (its -onethread puts the game and renderer on one thread)"
 
 
+def is_arm64_elf(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(20)
+    except OSError:
+        return False
+    if len(head) < 20 or head[:4] != b"\x7fELF":
+        return False
+    return struct.unpack_from("<H" if head[5] == 1 else ">H", head, 18)[0] == 183
+
+
+# The fixed preset is for the Windows build under Proton and FEX; Valve keeps dynamic resolution on for the native arm64 build.
 @fix
 def half_life_alyx_vr(game):
     if game.app_id != "546560" and game.stem != "hlvr":
+        return None
+    if os.path.basename(os.path.dirname(game.exe)).lower() == "linuxarm64" or is_arm64_elf(game.exe):
         return None
     def has_flag(name):
         return any(a.lower() == name or a.lower().startswith(name + "=") for a in game.args)

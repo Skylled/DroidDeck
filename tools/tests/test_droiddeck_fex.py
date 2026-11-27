@@ -176,6 +176,27 @@ class ArchitectureTest(FexTestCase):
         self.write(game / "a/b/game", elf(62), 0o755)
         self.assertTrue(FEX["needs_fex"](str(game)))
 
+    def test_binary_folders_are_scanned_before_a_large_data_tree(self):
+        game = self.tmp / "Half-Life Alyx"
+        script = self.write(game / "hlvr.sh", "#!/bin/sh\n")
+        for i in range(12):
+            self.write(game / ("game/hlvr/pak01_%03d.vpk" % i), b"data")
+            self.write(game / ("game/core/pak01_%03d.vpk" % i), b"data")
+        self.write(game / "game/bin/linuxsteamrt64/hlvr", elf(62), 0o755)
+        with mock.patch.dict(G, {"SCAN_LIMIT": 6}):
+            self.assertTrue(FEX["needs_fex"](str(script)))
+            self.write(game / "game/bin/linuxarm64/hlvr", elf(183), 0o755)
+            self.assertFalse(FEX["needs_fex"](str(script)))
+
+    def test_the_scan_stops_at_its_limit(self):
+        game = self.tmp / "big"
+        for i in range(5):
+            self.write(game / ("data%d" % i), b"data")
+        self.write(game / "zz.arm64", elf(183), 0o755)
+        self.write(game / "aa.x86_64", elf(62), 0o755)
+        with mock.patch.dict(G, {"SCAN_LIMIT": 3}):
+            self.assertEqual(FEX["scan"](str(game)), {"x86": 1, "arm": 0})
+
     def test_appimage_offset_is_the_end_of_the_section_headers(self):
         head = bytearray(elf(62))
         struct.pack_into("<Q", head, 0x28, 1000)
@@ -1214,6 +1235,32 @@ class LaunchTest(FexTestCase):
             FEX["launch"]([str(program), "--flag"], {"PATH": "/usr/bin"}, "auto")
         native.assert_called_once_with(str(program), [str(program), "--flag"], {"PATH": "/usr/bin"})
         emulated.assert_not_called()
+
+    def test_a_bundled_arm64_build_runs_instead_of_the_x86_one(self):
+        tool = self.fex_tool()
+        self.runtime()
+        bin_dir = self.tmp / "Half-Life Alyx/game/bin"
+        x86 = self.write(bin_dir / "linuxsteamrt64/hlvr", elf(62), 0o755)
+        with mock.patch("os.execvpe") as native, mock.patch("os.execve") as emulated:
+            self.quiet(FEX["launch"], [str(x86), "-vr"], {}, "auto")
+        native.assert_not_called()
+        self.assertEqual(emulated.call_args[0][1], [str(tool / "usr/bin/FEX"), str(x86), "-vr"])
+
+        arm = self.write(bin_dir / "linuxarm64/hlvr", elf(183), 0o755)
+        with mock.patch("os.execvpe") as native, mock.patch("os.execve") as emulated:
+            _, said = self.quiet(FEX["launch"], [str(x86), "-vr"], {"A": "1"}, "auto")
+        native.assert_called_once_with(str(arm), [str(arm), "-vr"], {"A": "1"})
+        emulated.assert_not_called()
+        self.assertIn("bundled arm64 build", said)
+
+        with mock.patch("os.execvpe") as native, mock.patch("os.execve") as emulated:
+            self.quiet(FEX["launch"], [str(x86), "-vr"], {}, "on")
+        native.assert_not_called()
+        self.assertEqual(emulated.call_args[0][1][1], str(x86))
+
+        os.chmod(arm, 0o644)
+        self.assertIsNone(FEX["arm64_build"](str(x86)))
+        self.assertIsNone(FEX["arm64_build"](str(self.write(self.tmp / "other/bin/hlvr", elf(62), 0o755))))
 
     def test_x86_programs_run_under_fex(self):
         tool = self.fex_tool()

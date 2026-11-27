@@ -3,6 +3,7 @@ import contextlib
 import fcntl
 import filecmp
 import gzip
+import heapq
 import json
 import os
 import re
@@ -75,6 +76,9 @@ X86 = {3: "i386", 62: "x86_64"}
 ARM = {40: "arm", 183: "arm64"}
 SCAN_DEPTH = 4
 SCAN_LIMIT = 4000
+BINARY_DIR = re.compile(r"(?i)bin|lib|arm|aarch|x86|x64|amd64|linux")
+# Source 2 ships each platform's build in a sibling bin/ folder; the arm64 one runs without FEX.
+ARM64_SIBLINGS = {"linuxsteamrt64": "linuxarm64", "linux64": "linuxarm64"}
 MODES = ("auto", "on", "off")
 STEAM_VERBS = ("run", "waitforexitandrun")
 ESCAPE = re.compile(rb"\\([0-7]{3})")
@@ -614,21 +618,35 @@ def elf_arch(path):
 
 
 def scan(folder):
+    # Binary-looking folders go first so a large data tree cannot use up the limit before them.
     counts = {"x86": 0, "arm": 0}
     seen = 0
-    base = folder.rstrip("/").count("/")
-    for directory, dirs, files in os.walk(folder):
-        if directory.count("/") - base >= SCAN_DEPTH:
-            dirs[:] = []
-        for name in files:
+    queue = [(0, 0, folder, False)]
+    while queue:
+        _, depth, directory, binary = heapq.heappop(queue)
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()
+                if is_dir and not entry.is_symlink() and depth < SCAN_DEPTH:
+                    below = binary or bool(BINARY_DIR.search(entry.name))
+                    heapq.heappush(queue, (0 if below else 1, depth + 1, entry.path, below))
+            except OSError:
+                continue
+            if is_dir:
+                continue
             seen += 1
             if seen > SCAN_LIMIT:
                 return counts
-            arch = elf_arch(os.path.join(directory, name))
+            arch = elf_arch(entry.path)
             if arch in X86.values():
                 counts["x86"] += 1
             elif arch in ARM.values():
                 counts["arm"] += 1
+                return counts
     return counts
 
 
@@ -749,8 +767,21 @@ def resolve(program, env):
     return shutil.which(program, path=env.get("PATH")) or program
 
 
+def arm64_build(program):
+    directory = os.path.dirname(program)
+    sibling = ARM64_SIBLINGS.get(os.path.basename(directory).lower())
+    if sibling is None or elf_arch(program) not in X86.values():
+        return None
+    candidate = os.path.join(os.path.dirname(directory), sibling, os.path.basename(program))
+    return candidate if is_arm(candidate) and os.access(candidate, os.X_OK) else None
+
+
 def launch(command, env, mode, decide=None):
     program = resolve(command[0], env)
+    native = arm64_build(program) if mode == "auto" and decide is None else None
+    if native:
+        say("running the bundled arm64 build %s instead of %s" % (native, program))
+        return os.execvpe(native, [native] + command[1:], env)
     use = mode == "on" or (mode == "auto" and needs_fex(decide or program))
     if not use:
         return os.execvpe(command[0], command, env)

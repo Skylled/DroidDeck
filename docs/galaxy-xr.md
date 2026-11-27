@@ -46,10 +46,12 @@ DroidDeck also runs Valve's ARM64 SteamVR directly on Galaxy XR with no host PC 
 4. **Bare-hand tracking fallback:** When 6DoF motion controllers are not paired, DroidDeck uses `XR_EXT_hand_tracking` (with runtime `android.permission.HAND_TRACKING`) to synthesize 6DoF hand poses, pinch-to-trigger, and grab-to-grip so you can navigate SteamVR menus and simple interactions.
 5. **Best standalone experiences vs experimental standalone Half-Life: Alyx:**
    - **Recommended standalone:** **VR Cinema / flat Steam games** (non-VR games launched while SteamVR is running automatically wrap into Gamescope's OpenVR theater panel) and lightweight VR titles such as **SUPERHOT VR**, **Half-Life 2: VR Mod**, and **Beat Saber**.
-   - **Experimental standalone Half-Life: Alyx:** When launching Half-Life: Alyx (`AppID 546560` / `hlvr.exe`) locally under standalone SteamVR, `droiddeck-game-env` automatically applies a low-resolution Vulkan preset (respecting any explicit user flags):
-     ```text
-     -vr -novid -vulkan +vr_fidelity_level_auto 0 +vr_fidelity_level 1 +vr_render_scale 0.65
-     ```
+   - **Experimental standalone Half-Life: Alyx:** Alyx's Linux depot (`546564`) now bundles a native ARM64 build (`game/bin/linuxarm64/hlvr`). On ARM devices `steam-compatibility` maps Alyx (`AppID 546560`) to **Linux x86 (FEX)** so Steam installs the Linux depot, and `droiddeck-fex` starts the bundled `linuxarm64` binary natively instead of emulating `linuxsteamrt64/hlvr`. The native build runs with Valve's defaults, including dynamic resolution.
+     - **Fallback:** if Alyx is installed from the Windows depot (`546563`), or a fully installed Linux depot has no `linuxarm64/hlvr`, Alyx stays on (or returns to) Proton ARM64. An existing Windows-depot install is not switched, so nothing is re-downloaded; pick **Linux x86 (FEX)** in the game's compatibility settings to move it to the native build. Set `DROIDDECK_FEX=on` to force the x86 Linux build under FEX.
+     - **Proton path only:** when `hlvr.exe` runs through Proton, `droiddeck-game-env` applies a low-resolution Vulkan preset (respecting any explicit user flags):
+       ```text
+       -vr -novid -vulkan +vr_fidelity_level_auto 0 +vr_fidelity_level 1 +vr_render_scale 0.65
+       ```
      Galaxy XR's 16 GB RAM avoids 8 GB OOM crashes, but sustained standalone performance on XR2+ Gen 2 remains experimental. Use **PCVR Streaming** for full-speed 4K gameplay.
 
 ## Troubleshooting
