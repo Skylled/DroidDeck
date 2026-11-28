@@ -15,9 +15,13 @@ static char g_exec_loader[PATH_MAX] = {0};
 static char *g_preload_guest = NULL;
 static char *g_preload_host = NULL;
 static int g_initialized = 0;
+// An allocator that the program brings in (Half-Life: Alyx's mimalloc) checks files with faccessat() on its first
+// allocation, and the set-up below allocates: the nested call must not start the set-up again.
+static int g_initializing = 0;
 
 static void init_ddnatv_hook(void) {
-    if (g_initialized) return;
+    if (g_initialized || g_initializing) return;
+    g_initializing = 1;
     const char *root = getenv("DDNATV_ROOT");
     if (root && strlen(root) > 0) {
         size_t len = strlen(root);
@@ -131,6 +135,7 @@ static void init_ddnatv_hook(void) {
         }
     }
     g_initialized = 1;
+    g_initializing = 0;
 }
 
 // Before the program runs: init_ddnatv_hook() sets variables, and setenv() may move the block the
