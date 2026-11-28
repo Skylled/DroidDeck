@@ -344,7 +344,7 @@ private fun rememberCapsuleArt(model: Any, size: Size, radius: Float): Painter {
     val h = size.height.roundToInt()
     return rememberAsyncImagePainter(
         remember(model, w, h, radius) {
-            ImageRequest.Builder(context).data(model).size(w, h).scale(Scale.FILL)
+            ImageRequest.Builder(context).data(model).apply { if (w > 0 && h > 0) size(w, h) }.scale(Scale.FILL)
                 .transformations(RoundedCornersTransformation(radius)).build()
         },
     )
