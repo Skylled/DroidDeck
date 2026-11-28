@@ -89,6 +89,43 @@ class SteamVrHelperTest(unittest.TestCase):
         self.executable(self.driver / 'xr-display-mode', 'exit 1')
         self.assertEqual(self.start().read_text().strip(), 'display=unset')
 
+    def test_headset_start_waits_for_fresh_tracking(self):
+        self.runtime.mkdir()
+        counter = self.root / 'probes'
+        self.executable(self.driver / 'xr-display-mode',
+                        f'n=$(( $(cat {counter} 2>/dev/null || echo 0) + 1 )); echo $n > {counter}; '
+                        '[ "$n" -ge 4 ] || exit 1; echo 2464x1440@72')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as receiver:
+            receiver.bind(str(self.runtime / 'droiddeck-xr-frames'))
+            self.assertEqual(self.start().read_text().strip(), 'display=2464x1440@72')
+        self.assertEqual(counter.read_text().strip(), '4')
+
+    def test_headset_start_gives_up_on_stale_tracking(self):
+        self.runtime.mkdir()
+        self.executable(self.driver / 'xr-display-mode', 'exit 1')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as receiver:
+            receiver.bind(str(self.runtime / 'droiddeck-xr-frames'))
+            self.assertEqual(self.start().read_text().strip(), 'display=unset')
+
+    def zombie(self):
+        child = subprocess.Popen(['true'])
+        self.addCleanup(child.wait)
+        deadline = time.monotonic() + 2
+        while Path(f'/proc/{child.pid}/status').read_text().find('State:\tZ') < 0:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        return child.pid
+
+    def test_zombie_steamvr_processes_do_not_count_as_running(self):
+        pid = self.zombie()
+        self.executable(self.commands / 'pgrep', f'echo {pid}')
+        result = subprocess.run(['sh', str(self.helper), 'status'], env=self.environment,
+                                capture_output=True, text=True, timeout=5, check=True)
+        self.assertIn('running=0', result.stdout)
+        (self.runtime / 'droiddeck-steamvr').mkdir(parents=True, exist_ok=True)
+        (self.runtime / 'droiddeck-steamvr/active').touch()
+        self.assertEqual(self.start().read_text().strip(), 'display=3360x1760@120')
+
     def test_older_runtime_without_the_reader_still_starts(self):
         (self.driver / 'xr-display-mode').unlink()
         self.assertEqual(self.start().read_text().strip(), 'display=unset')

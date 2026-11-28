@@ -14,7 +14,13 @@ chmod 700 "$state"
 PKG_URL=https://steamdeck-packages.steamos.cloud/archlinux-deckard-hotfixes/release/0.3.x/deckard-steamvr-rel-r25358740%2B28b72a4f-1-aarch64.pkg.tar.zst
 PKG_SHA256=90a600775eb3e8856dc475f83166a93a290a0b1f3b4e82a69c8e2a8f06b9ddc9
 
-running() { pgrep -x vrserver >/dev/null 2>&1; }
+# Exited SteamVR processes can stay as zombies under droiddeck-agent, which does not reap orphans.
+live() {
+    for p in $(pgrep "$@" 2>/dev/null); do
+        [ "$(sed -n 's/^State:[[:space:]]*\(.\).*/\1/p' "/proc/$p/status" 2>/dev/null)" = Z ] || echo "$p"
+    done
+}
+running() { [ -n "$(live -x vrserver)" ]; }
 installed() { [ -x "$steamvr/bin/linuxarm64/vrstartup" ]; }
 quest_settings() {
     backup=$HOME/.local/share/droiddeck/steamvr-quest-settings.json
@@ -37,6 +43,10 @@ configure_graphics() {
                 done
             )"
             ;;
+        Adreno740*)
+            # Turnip's sysmem path leaks the left eye's depth into the right eye's pass without it.
+            case ",${TU_DEBUG:-}," in *,flushall,*) ;; *) export TU_DEBUG="${TU_DEBUG:+$TU_DEBUG,}flushall" ;; esac
+            ;;
     esac
 }
 
@@ -50,21 +60,21 @@ unregister() {
 }
 
 idle() {
-    [ ! -f "$state/active" ] && ! running && ! pgrep -x vrstartup >/dev/null 2>&1 &&
+    [ ! -f "$state/active" ] && ! running && [ -z "$(live -x vrstartup)" ] &&
         ( flock -n 9 ) 9>"$state/start.lock"
 }
 
 stop() {
     rm -f "$state/active"
     for n in vrcompositor vrserver vrmonitor vrdashboard vrstartup vrwebhelper; do
-        for p in $(pgrep -x "$n"); do kill "$p" 2>/dev/null; done
+        for p in $(live -x "$n"); do kill "$p" 2>/dev/null; done
     done
-    for p in $(pgrep -f "$steamvr/bin/linuxarm64/vrcompositor-launcher"); do kill "$p" 2>/dev/null; done
+    for p in $(live -f "$steamvr/bin/linuxarm64/vrcompositor-launcher"); do kill "$p" 2>/dev/null; done
     attempts=0
-    while pgrep -x 'vrserver|vrcompositor' >/dev/null 2>&1; do
+    while [ -n "$(live -x 'vrserver|vrcompositor')" ]; do
         attempts=$((attempts + 1))
         if [ "$attempts" = 10 ]; then
-            for p in $(pgrep -x 'vrserver|vrcompositor'); do kill -KILL "$p" 2>/dev/null; done
+            for p in $(live -x 'vrserver|vrcompositor'); do kill -KILL "$p" 2>/dev/null; done
         fi
         [ "$attempts" -lt 20 ] || { echo 'SteamVR did not stop; preferences remain backed up' >&2; return 1; }
         sleep 0.1
@@ -122,7 +132,7 @@ start)
     flock -n 9 || { echo "SteamVR start already in progress"; exit 0; }
     installed || { echo "SteamVR is not installed (droiddeck-steamvr install)"; exit 1; }
     [ -f "$driver/bin/linuxarm64/driver_droiddeck.so" ] || { echo "the Cardboard driver is missing from $driver"; exit 1; }
-    if [ -f "$state/active" ] && { running || pgrep -x vrstartup >/dev/null 2>&1; }; then
+    if [ -f "$state/active" ] && { running || [ -n "$(live -x vrstartup)" ]; }; then
         echo "DroidDeck SteamVR is already running"
         exit 0
     fi
@@ -229,8 +239,19 @@ JSON
         export DROIDDECK_VR_PRODUCER_LEASE=${DROIDDECK_VR_PRODUCER_LEASE:-1}
     fi
     if [ -z "${DROIDDECK_VR_DISPLAY_MODE:-}" ] && [ -x "$driver/bin/linuxarm64/xr-display-mode" ]; then
-        mode=$("$driver/bin/linuxarm64/xr-display-mode") || mode=
-        if [ -n "$mode" ]; then export DROIDDECK_VR_DISPLAY_MODE="$mode"; fi
+        # The driver picks headset or Cardboard mode once, from this tracking file, when vrserver starts.
+        attempts=0
+        until mode=$("$driver/bin/linuxarm64/xr-display-mode"); do
+            mode=
+            attempts=$((attempts + 1))
+            [ -S "/run/droiddeck/droiddeck-xr-frames" ] && [ "$attempts" -lt 30 ] || break
+            sleep 0.1
+        done
+        if [ -n "$mode" ]; then
+            export DROIDDECK_VR_DISPLAY_MODE="$mode"
+        elif [ -S "/run/droiddeck/droiddeck-xr-frames" ]; then
+            echo "headset tracking is not fresh; SteamVR may start in Cardboard mode" >&2
+        fi
     fi
 
     shims=$state/shims

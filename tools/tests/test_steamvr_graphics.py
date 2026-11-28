@@ -69,9 +69,14 @@ class SteamVrGraphicsTest(unittest.TestCase):
         self.assertEqual(self.launch('Adreno840v2', 'sysmem', action='launch',
                                     preload='/existing/preload.so'), '')
 
+    def test_adreno_740_keeps_sysmem_and_adds_flushall_once(self):
+        self.assertEqual(self.launch('Adreno740v3'), 'flushall')
+        self.assertEqual(self.launch('Adreno740v3', 'sysmem'), 'sysmem,flushall')
+        self.assertEqual(self.launch('Adreno740v3', 'sysmem,flushall'), 'sysmem,flushall')
+
     def test_other_and_unknown_gpus_keep_their_environment(self):
-        self.assertEqual(self.launch('Adreno740'), 'unset')
-        self.assertEqual(self.launch('Adreno740', 'sysmem,forcecb'), 'sysmem,forcecb')
+        self.assertEqual(self.launch('Adreno750'), 'unset')
+        self.assertEqual(self.launch('Adreno750', 'sysmem,forcecb'), 'sysmem,forcecb')
         self.assertEqual(self.launch('', 'sysmem'), 'sysmem')
 
 

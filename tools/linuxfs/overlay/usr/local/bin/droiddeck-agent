@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.request
 import urllib.parse
+import weakref
 from pathlib import Path
 
 VERSION = 1
@@ -36,6 +37,63 @@ WM_STATES = {0: "withdrawn", 1: "normal", 3: "iconic"}
 
 def log(message):
     print("== agent: " + message, flush=True)
+
+
+_spawn_lock = threading.Lock()
+_owned = weakref.WeakSet()
+
+
+class TrackedPopen(subprocess.Popen):
+    def __init__(self, *args, **kwargs):
+        with _spawn_lock:
+            super().__init__(*args, **kwargs)
+            _owned.add(self)
+
+
+def zombie_children(parent):
+    found = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % entry) as stat_file:
+                stat = stat_file.read()
+        except OSError:
+            continue
+        fields = stat[stat.rfind(")") + 2:].split()
+        if len(fields) > 1 and fields[0] == "Z" and fields[1] == str(parent):
+            found.append(int(entry))
+    return found
+
+
+def reap_orphans():
+    # Detached helpers such as SteamVR's vrstartup are reparented here; SteamVR treats their zombies as still running.
+    reaped = []
+    with _spawn_lock:
+        waiting = {proc.pid for proc in list(_owned) if proc.returncode is None}
+        for pid in zombie_children(os.getpid()):
+            if pid in waiting:
+                continue
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    reaped.append(pid)
+            except ChildProcessError:
+                pass
+    return reaped
+
+
+class OrphanReaper(threading.Thread):
+    def __init__(self, interval=1.0):
+        super().__init__(daemon=True, name="orphan-reaper")
+        self.interval = interval
+
+    def run(self):
+        while True:
+            try:
+                reap_orphans()
+            except OSError:
+                pass
+            time.sleep(self.interval)
 
 
 def write_json(path, value):
@@ -1241,6 +1299,8 @@ def answer(agent_dir, path):
 def serve(agent_dir, focus=True, poll=0.1):
     (agent_dir / "req").mkdir(parents=True, exist_ok=True)
     (agent_dir / "resp").mkdir(parents=True, exist_ok=True)
+    subprocess.Popen = TrackedPopen
+    OrphanReaper().start()
     can_focus = focus and bool(os.environ.get("DISPLAY"))
     if can_focus:
         FocusWatcher(agent_dir / "focus.json").start()

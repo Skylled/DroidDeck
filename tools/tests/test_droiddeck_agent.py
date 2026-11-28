@@ -1029,3 +1029,24 @@ class VrFocusTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(os.path.isdir("/proc/self"), "needs /proc")
+class OrphanReaperTest(unittest.TestCase):
+    def wait_zombie(self, pid):
+        deadline = time.monotonic() + 2
+        while pid not in agent.zombie_children(os.getpid()):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
+    def test_untracked_zombie_is_reaped(self):
+        orphan = subprocess.Popen(["true"])
+        self.wait_zombie(orphan.pid)
+        self.assertIn(orphan.pid, agent.reap_orphans())
+        self.assertNotIn(orphan.pid, agent.zombie_children(os.getpid()))
+
+    def test_tracked_child_keeps_its_exit_status(self):
+        tracked = agent.TrackedPopen(["sh", "-c", "exit 3"])
+        self.wait_zombie(tracked.pid)
+        self.assertNotIn(tracked.pid, agent.reap_orphans())
+        self.assertEqual(tracked.wait(timeout=2), 3)
